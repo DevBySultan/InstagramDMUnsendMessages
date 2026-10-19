@@ -1,16 +1,11 @@
-#!/usr/bin/env node
 // Unsends your own messages in one Instagram DM conversation by driving the
 // regular instagram.com web UI in a browser window on your own computer.
 
 import { chromium } from 'playwright';
-import { parseArgs } from 'node:util';
-import { createInterface } from 'node:readline/promises';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const INBOX_URL = 'https://www.instagram.com/direct/inbox/';
+export const INBOX_URL = 'https://www.instagram.com/direct/inbox/';
 
 // UI strings in English and Arabic. English is the tested path; switch the
 // Instagram web language to English if the Arabic labels do not match.
@@ -28,6 +23,12 @@ const CURRENT = 'data-unsend-current';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const jitter = (min, max) => min + Math.random() * (max - min);
+
+// Sleeps in short steps so a stop request is noticed quickly.
+async function wait(ms, shouldStop) {
+  const end = Date.now() + ms;
+  while (Date.now() < end && !shouldStop()) await sleep(Math.min(250, end - Date.now()));
+}
 
 // Runs in the page. Instagram's markup has no roles for messages, so this finds
 // the list under data-pagelet="IGDMessagesList", tags each message row, and
@@ -203,6 +204,10 @@ export async function waitForMessages(page, timeout = 30000) {
   }
 }
 
+// Why a run ended: 'end' (start of the conversation reached), 'limit',
+// 'stopped' (shouldStop returned true), 'blocked' (Instagram's "try again
+// later"), or 'unconfirmed' (5 unsends in a row left the message on screen).
+// onEvent receives { type: 'unsent' | 'found' | 'loading' | 'pause' | 'working', ... }.
 export async function unsendThread(page, options = {}) {
   const {
     dryRun = false,
@@ -211,36 +216,43 @@ export async function unsendThread(page, options = {}) {
     maxDelay = 4000,
     breakEvery = 40,
     breakSeconds = 90,
-    log = console.log,
+    shouldStop = () => false,
+    onEvent = () => {},
   } = options;
-  const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, stoppedBy: 'end of conversation' };
+  const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, stoppedBy: 'end' };
   let failuresInARow = 0;
 
   if (!(await waitForMessages(page))) throw new Error('Could not find the conversation messages on the page.');
 
   while (true) {
+    if (shouldStop()) {
+      stats.stoppedBy = 'stopped';
+      break;
+    }
     if (stats.unsent + stats.found >= limit) {
-      stats.stoppedBy = `reached --limit ${limit}`;
+      stats.stoppedBy = 'limit';
       break;
     }
     await page.evaluate(tagRows);
     const next = page.locator(`${ROW}${MINE}:not([${SEEN}])`).last();
     if ((await next.count()) === 0) {
+      onEvent({ type: 'loading' });
       if (!(await loadOlder(page))) break;
       continue;
     }
 
+    onEvent({ type: 'working' });
     const result = await processRow(page, await next.elementHandle(), dryRun);
     stats[result]++;
 
     if (await isBlocked(page)) {
-      stats.stoppedBy = 'Instagram showed a "try again later" / action blocked message';
+      stats.stoppedBy = 'blocked';
       break;
     }
 
     if (result === 'unconfirmed') {
       if (++failuresInARow >= 5) {
-        stats.stoppedBy = '5 unsends in a row did not remove the message; run --inspect and check the labels';
+        stats.stoppedBy = 'unconfirmed';
         break;
       }
     } else if (result === 'unsent') {
@@ -249,12 +261,12 @@ export async function unsendThread(page, options = {}) {
 
     if (result === 'unsent' || result === 'found') {
       const done = stats.unsent + stats.found;
-      log(`${dryRun ? 'Would unsend' : 'Unsent'} #${done}`);
+      onEvent({ type: result, count: done });
       if (!dryRun && breakEvery > 0 && done % breakEvery === 0) {
-        log(`Pausing ${breakSeconds}s to stay under Instagram's rate limits...`);
-        await sleep(breakSeconds * 1000);
+        onEvent({ type: 'pause', seconds: breakSeconds });
+        await wait(breakSeconds * 1000, shouldStop);
       } else {
-        await sleep(jitter(minDelay, maxDelay));
+        await wait(jitter(minDelay, maxDelay), shouldStop);
       }
     }
   }
@@ -264,7 +276,7 @@ export async function unsendThread(page, options = {}) {
 
 // Writes the structure and labels of the page (no message text) so the
 // selectors can be fixed if Instagram changes its markup.
-async function inspect(page) {
+export async function inspect(page, dir) {
   const rows = await page.evaluate(tagRows);
   const last = page.locator(`${ROW}${MINE}`).last();
   if (await last.count()) {
@@ -285,113 +297,27 @@ async function inspect(page) {
       .filter((el) => el.label),
   }));
   report.rows = rows ?? 0;
-  await mkdir(path.join(ROOT, 'debug'), { recursive: true });
-  const file = path.join(ROOT, 'debug', `inspect-${Date.now()}.json`);
+  await mkdir(dir, { recursive: true });
+  const file = path.join(dir, `inspect-${Date.now()}.json`);
   await writeFile(file, JSON.stringify(report, null, 2));
-  console.log(`Found ${report.rows} messages, ${report.yourRows} of them yours. Report saved to ${file}`);
-  return file;
+  return { file, rows: report.rows, yourRows: report.yourRows };
 }
 
-async function launch(headless) {
-  const userDataDir = path.join(ROOT, '.browser-profile');
-  const base = { headless, viewport: null, args: ['--start-maximized'] };
+// Opens a browser window that keeps its own Instagram login in profileDir.
+// Uses the installed Google Chrome, or Playwright's Chromium without it.
+export async function launchBrowser(profileDir, { headless = false } = {}) {
+  const base = { headless, viewport: null, args: ['--start-maximized'], handleSIGINT: false };
   if (process.env.PW_CHROMIUM_PATH) {
-    return chromium.launchPersistentContext(userDataDir, { ...base, executablePath: process.env.PW_CHROMIUM_PATH });
+    return chromium.launchPersistentContext(profileDir, { ...base, executablePath: process.env.PW_CHROMIUM_PATH });
   }
   try {
-    return await chromium.launchPersistentContext(userDataDir, { ...base, channel: 'chrome' });
+    return await chromium.launchPersistentContext(profileDir, { ...base, channel: 'chrome' });
   } catch {
-    return chromium.launchPersistentContext(userDataDir, base);
+    return chromium.launchPersistentContext(profileDir, base);
   }
 }
 
-async function main() {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-      'dry-run': { type: 'boolean', default: false },
-      inspect: { type: 'boolean', default: false },
-      yes: { type: 'boolean', default: false },
-      headless: { type: 'boolean', default: false },
-      limit: { type: 'string' },
-      'min-delay': { type: 'string', default: '1500' },
-      'max-delay': { type: 'string', default: '4000' },
-      'break-every': { type: 'string', default: '40' },
-      'break-seconds': { type: 'string', default: '90' },
-    },
-  });
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const context = await launch(values.headless);
-  const page = context.pages()[0] ?? (await context.newPage());
+export const isLoginPage = (page) => /\/accounts\/login|\/challenge\//.test(page.url());
 
-  try {
-    let threadUrl = positionals[0];
-    await page.goto(threadUrl ?? INBOX_URL);
-
-    if (page.url().includes('/accounts/login')) {
-      await rl.question('Log in to Instagram in the browser window, then press Enter here... ');
-      if (threadUrl) await page.goto(threadUrl);
-    }
-    if (!threadUrl) {
-      await rl.question('Open the conversation in the browser window, then press Enter here... ');
-      threadUrl = page.url();
-    }
-    if (threadUrl.includes('instagram.com') && !threadUrl.includes('/direct/t/')) {
-      throw new Error(`Not a conversation URL: ${threadUrl}`);
-    }
-
-    // Instagram can show popups after logging in (save login info, PIN, notifications).
-    while (!(await waitForMessages(page))) {
-      const file = await inspect(page);
-      await rl.question(
-        'Could not find the messages of the conversation.\n'
-        + '  - Close any Instagram popup in the window and make sure the conversation is open.\n'
-        + `  - If this keeps happening, send the file ${file}\n`
-        + 'Press Enter to try again, or Ctrl+C to quit... ',
-      );
-    }
-
-    if (values.inspect) return await inspect(page);
-
-    const dryRun = values['dry-run'];
-    if (!dryRun && !values.yes) {
-      const answer = await rl.question(
-        `This will UNSEND your messages for everyone in:\n  ${threadUrl}\nIt cannot be undone. Type YES to continue: `,
-      );
-      if (answer.trim() !== 'YES') return console.log('Cancelled.');
-    }
-
-    process.once('SIGINT', () => {
-      console.log('\nStopped. Run the same command again to continue.');
-      process.exit(130);
-    });
-    const stats = await unsendThread(page, {
-      dryRun,
-      limit: values.limit ? Number(values.limit) : Infinity,
-      minDelay: Number(values['min-delay']),
-      maxDelay: Number(values['max-delay']),
-      breakEvery: Number(values['break-every']),
-      breakSeconds: Number(values['break-seconds']),
-    });
-    console.log(
-      dryRun
-        ? `Dry run done. Your messages found: ${stats.found}.`
-        : `Done. Unsent: ${stats.unsent}. Unconfirmed: ${stats.unconfirmed}.`,
-    );
-    if (stats.skipped) console.log(`Messages that looked like yours but had no Unsend option: ${stats.skipped}.`);
-    console.log(`Stopped because: ${stats.stoppedBy}`);
-    if (stats.unsent + stats.found === 0) {
-      console.log(`Nothing found. Send the file ${await inspect(page)}`);
-    }
-  } finally {
-    rl.close();
-    await context.close();
-  }
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    console.error(error.message);
-    process.exit(1);
-  });
-}
+// The language Instagram is shown in, from <html lang>.
+export const pageLanguage = (page) => page.evaluate(() => document.documentElement.lang || '');

@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { unsendThread, waitForMessages } from '../unsend.mjs';
+import { unsendThread, waitForMessages } from '../src/unsender.mjs';
 
 const MOCK = pathToFileURL(new URL('./mock-thread.html', import.meta.url).pathname).href;
 const FAST = { minDelay: 0, maxDelay: 0, breakEvery: 0, log: () => {} };
@@ -60,5 +60,14 @@ test('reports when the conversation is not on the page', async () => {
   const page = await browser.newPage();
   await page.setContent('<p>Save your login info?</p>');
   assert.equal(await waitForMessages(page, 1500), false);
+  await page.close();
+});
+
+test('stops safely when asked to', async () => {
+  const page = await open();
+  let events = 0;
+  const stats = await unsendThread(page, { ...FAST, onEvent: (e) => { if (e.type === 'unsent') events++; }, shouldStop: () => events >= 2 });
+  assert.equal(stats.unsent, 2);
+  assert.equal(stats.stoppedBy, 'stopped');
   await page.close();
 });

@@ -1,64 +1,88 @@
-# Instagram DM Unsend
+# IG Unsend
 
-Unsends **your own** messages in one Instagram DM conversation, for both sides, by driving the normal instagram.com web UI in a browser window on your computer.
+A command-line tool that unsends **your own** messages in an Instagram DM conversation, for both sides. It drives the normal instagram.com website in a browser window on your computer, with menus you control from the terminal.
 
-- Runs on your machine, in a browser profile kept in `.browser-profile/`. You log in yourself in the window. Your password never goes into the code or a file.
-- It only touches the one conversation you pick, and only messages whose menu offers **Unsend** (the other person's messages are skipped).
-- **Unsending is permanent.** Download a copy first if you might want it later (Instagram → Settings → Your activity → Download your information).
+```
+  ┌─────────────────────────────────────────────────────┐
+  │ IG Unsend  v1.0.0                                   │
+  │ Unsend your own Instagram messages, for both sides. │
+  └─────────────────────────────────────────────────────┘
 
-## Requirements
+  Speed Safe   Limit None   Saved login Yes
 
-- Node.js 20 or newer
-- Google Chrome (otherwise run `npx playwright install chromium` once)
-
-```bash
-npm install
+? What do you want to do?
+> Test run
+  Unsend my messages
+ ──────────────
+  Settings
+  Diagnose
+  Log out
+  Help
+ ──────────────
+  Exit
 ```
 
-## Usage
+- Runs only on your computer. You log in to Instagram yourself, in the browser window. Your password is never typed into the tool or saved by it.
+- Touches only the conversation you choose, and only messages whose menu offers **Unsend**.
+- **Unsending is permanent.** If you might want a copy, download it first (Instagram → Settings → Your activity → Download your information).
 
-1. Switch Instagram web to **English** (the language selector at the bottom of instagram.com). The bot looks for the English button names; Arabic is supported on a best-effort basis.
-2. Copy the conversation link from instagram.com, e.g. `https://www.instagram.com/direct/t/1234567890/`.
-3. Do a dry run first. It opens each message's menu and closes it without unsending:
+## Install (once)
 
-   ```bash
-   npm start -- "https://www.instagram.com/direct/t/1234567890/" --dry-run --limit 5
-   ```
+You need [Node.js](https://nodejs.org) 20.17 or newer and Google Chrome.
 
-   On the first run, log in inside the window that opens, then press Enter in the terminal. If Instagram shows a popup after logging in (save login info, notifications, a PIN), close it in the window. If the bot cannot find the messages, it saves a report to `debug/` and waits for you to press Enter to try again.
-4. Try a real run on a few messages, then on the whole conversation:
+```bat
+git clone https://github.com/DevBySultan/InstagramDMUnsendMessages.git
+cd InstagramDMUnsendMessages
+npm install
+npm link
+```
 
-   ```bash
-   npm start -- "https://www.instagram.com/direct/t/1234567890/" --limit 5
-   npm start -- "https://www.instagram.com/direct/t/1234567890/"
-   ```
+`npm link` adds the `ig-unsend` command, so you can start the tool from any folder.
 
-   Type `YES` to confirm. Keep the window open; you can minimize it. Press `Ctrl+C` to stop, and run the same command again to continue where it stopped.
+## Start
 
-Without a link, the bot opens your inbox and asks you to open the conversation in the window.
+Open cmd (or any terminal) and type:
 
-## Options
+```bat
+ig-unsend
+```
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--dry-run` | off | Count your messages without unsending |
-| `--limit N` | all | Stop after N messages |
-| `--min-delay` / `--max-delay` | 1500 / 4000 | Random wait between unsends, in ms |
-| `--break-every N` | 40 | Take a longer break every N unsends (0 = never) |
-| `--break-seconds S` | 90 | Length of that break |
-| `--yes` | off | Skip the `YES` confirmation |
-| `--inspect` | off | Save the button labels on the page to `debug/` (no message text) |
+Without `npm link`, run `start.cmd` in the tool's folder (or double-click it), or `npm start`.
+
+Use the arrow keys and Enter to choose.
+
+1. **Test run** first. A browser window opens. The first time, log in to Instagram there. Pick the conversation: paste its link (open the chat on instagram.com and copy the address bar), or open it in the browser window. The test checks a few of your messages and deletes nothing.
+2. **Unsend my messages** when the test finds your messages. The tool shows the conversation, speed and limit, and starts only when you type `UNSEND`.
+3. While it runs you see the count, the speed per minute and the time. Keep the browser window open (minimizing is fine). **Ctrl+C** stops safely after the current message; running it again continues where it stopped.
+
+Conversations you used appear at the top of the list next time, with how many messages were unsent.
+
+## Settings
+
+| Setting | Options |
+| --- | --- |
+| Speed | **Safe** (default): 3-7 s between messages, 2 min break every 30 · **Normal**: 1.5-4 s, 90 s break every 40 · **Fast**: 0.8-2 s, 1 min break every 60 |
+| Messages per run | Stop after this many, to spread a big conversation over several days. 0 = no limit |
+
+Settings and the recent conversations are saved in `settings.json` in the tool's folder. The Instagram login is kept in `.browser-profile/`; **Log out** deletes it.
 
 ## Limits and risks
 
-- **Instagram rate limits are not published.** The bot stops as soon as Instagram shows "Try again later" / action blocked. If that happens, wait a day and raise the delays.
-- **Automating Instagram is against its Terms of Use.** The bot behaves like a person clicking, slowly, but the risk to your account is not zero.
-- **It depends on Instagram's page structure.** If Instagram changes it, the bot finds nothing or stops after 5 unsends that did not go through. Run `npm run inspect -- "<conversation link>"` and use the file in `debug/` to update the labels in `unsend.mjs`.
-- Unsending does not undo what the other person already saw, saved, screenshotted, or downloaded.
+- **Instagram's rate limits are not published.** The tool stops as soon as Instagram shows "Try again later". Wait a day, then use the Safe speed.
+- **Automating Instagram is against its Terms of Use.** The tool clicks like a person and is slow on purpose, but the risk to your account is not zero.
+- **It depends on how instagram.com is built.** Keep Instagram in English. If the tool cannot find your messages, choose **Diagnose**: it saves a report to `debug/` with the page structure and button names (no message text) that shows what to fix.
+- Unsending does not undo what the other person already saw, saved, screenshotted or downloaded.
 
-## Tests
+## Project layout
 
-The tests run the bot against a local copy of a DM thread (`test/mock-thread.html`), not against Instagram:
+| Path | What it is |
+| --- | --- |
+| `bin/ig-unsend.mjs` | The `ig-unsend` command |
+| `src/cli.mjs` | Menus, choosing a conversation, progress and summary |
+| `src/unsender.mjs` | Browser automation: finding your messages and unsending them |
+| `src/settings.mjs` | Speed presets, limit and recent conversations |
+| `src/ui.mjs` | Terminal output helpers |
+| `test/` | Tests against a local copy of a DM page (`mock-thread.html`), not against Instagram |
 
 ```bash
 npm test
