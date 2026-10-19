@@ -256,10 +256,14 @@ async function runUnsend({ dryRun }) {
   ui.blank();
   ui[kind](reason);
   if (stats.stoppedBy === 'reverted') {
-    ui.note('Usually a temporary limit on your account, or this conversation does not allow');
-    ui.note('unsending (for example the other person blocked or restricted you).');
-    ui.note('Check: unsend one message by hand in the Instagram app. If it also comes back,');
-    ui.note('it is Instagram, not this tool. Wait 24 hours, then try again on Safe speed.');
+    for (const text of stats.notices) ui.note(`Instagram said: "${text}"`);
+    ui.blank();
+    ui.note('To find out why, before going back to the menu:');
+    ui.note('  1. In the browser window (still open), unsend one message by hand.');
+    ui.note('  2. Then try the same in the Instagram app on your phone.');
+    ui.note('Both come back: Instagram refuses it (account limit, or the other person blocked');
+    ui.note('  or restricted you). Wait 24 hours and try again on Safe speed.');
+    ui.note('Only the browser fails: choose Log out, then log in again and retry.');
   } else if (stats.unsent + stats.found === 0 && stats.stoppedBy !== 'stopped') {
     ui.warn('Nothing was found. Run Diagnose from the menu and send the report.');
   } else if (dryRun) {

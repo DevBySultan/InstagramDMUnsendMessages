@@ -78,7 +78,14 @@
       setTimeout(() => {
         const parent = row.parentNode, next = row.nextSibling;
         row.remove();
-        if (putBack) setTimeout(() => parent.insertBefore(makeRow(Number(row.dataset.index)), next), 300);
+        if (putBack) setTimeout(() => {
+          parent.insertBefore(makeRow(Number(row.dataset.index)), next);
+          const toast = document.createElement('div');
+          toast.setAttribute('role', 'alert');
+          toast.textContent = "Couldn't unsend message";
+          document.body.append(toast);
+          setTimeout(() => toast.remove(), 600);
+        }, 300);
       }, 200);
     };
     cancel.onclick = () => dialog.remove();

@@ -135,7 +135,13 @@ const countMatching = (page, fp) => page.evaluate((value) => {
 // Returns 'skipped' (no Unsend in the menu), 'found' (dry run), 'unsent',
 // 'unconfirmed' (the message stayed on screen), or 'reverted' (it went away
 // and Instagram put it back, meaning its server refused the unsend).
-async function processRow(page, handle, { dryRun, settleMs }) {
+// Text of popups and notices Instagram shows (errors, "try again later").
+const readNotices = (page) => page.evaluate(() => {
+  const nodes = document.querySelectorAll('[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"], [role="dialog"]');
+  return [...nodes].map((el) => el.innerText?.trim().replace(/\s+/g, ' ')).filter((text) => text && text.length < 300);
+}).catch(() => []);
+
+async function processRow(page, handle, { dryRun, settleMs, notices }) {
   await handle.evaluate((el, attr) => el.setAttribute(attr, '1'), CURRENT);
   const row = page.locator(`[${CURRENT}]`);
   try {
@@ -174,7 +180,12 @@ async function processRow(page, handle, { dryRun, settleMs }) {
     }
     // Instagram hides the message at once and puts it back if its server
     // refuses, so check again after a moment.
-    await sleep(settleMs);
+    // Notices can disappear quickly, so read them while waiting.
+    const end = Date.now() + settleMs;
+    while (Date.now() < end) {
+      for (const text of await readNotices(page)) if (!LABELS.unsend.test(text)) notices.add(text);
+      await sleep(250);
+    }
     await page.evaluate(tagRows);
     return (await countMatching(page, fp)) >= before ? 'reverted' : 'unsent';
   } finally {
@@ -236,7 +247,8 @@ export async function unsendThread(page, options = {}) {
     shouldStop = () => false,
     onEvent = () => {},
   } = options;
-  const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, reverted: 0, stoppedBy: 'end' };
+  // notices: what Instagram said when it put messages back, to show the user.
+  const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, reverted: 0, notices: [], stoppedBy: 'end' };
   let failuresInARow = 0;
   let revertsInARow = 0;
   // Fingerprint -> times Instagram put that message back. A put-back message
@@ -270,7 +282,8 @@ export async function unsendThread(page, options = {}) {
     }
 
     onEvent({ type: 'working' });
-    const result = await processRow(page, handle, { dryRun, settleMs });
+    const notices = new Set();
+    const result = await processRow(page, handle, { dryRun, settleMs, notices });
     stats[result]++;
 
     if (await isBlocked(page)) {
@@ -285,6 +298,7 @@ export async function unsendThread(page, options = {}) {
       }
     } else if (result === 'reverted') {
       revertedTimes.set(fp, (revertedTimes.get(fp) ?? 0) + 1);
+      for (const text of notices) if (!stats.notices.includes(text)) stats.notices.push(text);
       onEvent({ type: 'reverted', inARow: ++revertsInARow });
       if (revertsInARow >= 3) {
         stats.stoppedBy = 'reverted';
@@ -345,7 +359,16 @@ export async function inspect(page, dir) {
 // Opens a browser window that keeps its own Instagram login in profileDir.
 // Uses the installed Google Chrome, or Playwright's Chromium without it.
 export async function launchBrowser(profileDir, { headless = false } = {}) {
-  const base = { headless, viewport: null, args: ['--start-maximized'], handleSIGINT: false };
+  // Without these, Chrome tells every site it is automated (navigator.webdriver
+  // and the "controlled by automated test software" bar), which Instagram can
+  // use to refuse actions.
+  const base = {
+    headless,
+    viewport: null,
+    args: ['--start-maximized', '--disable-blink-features=AutomationControlled'],
+    ignoreDefaultArgs: ['--enable-automation'],
+    handleSIGINT: false,
+  };
   if (process.env.PW_CHROMIUM_PATH) {
     return chromium.launchPersistentContext(profileDir, { ...base, executablePath: process.env.PW_CHROMIUM_PATH });
   }

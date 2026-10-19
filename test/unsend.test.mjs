@@ -78,6 +78,7 @@ test('does not count or loop on messages Instagram puts back', async () => {
   assert.equal(stats.unsent, 0);
   assert.equal(stats.reverted, 3);
   assert.equal(stats.stoppedBy, 'reverted');
+  assert.deepEqual(stats.notices, ["Couldn't unsend message"]);
   assert.equal((await remaining(page)).filter(Boolean).length, 20);
   await page.close();
 });
@@ -88,4 +89,16 @@ test('stops when Instagram starts putting messages back mid-run', async () => {
   assert.equal(stats.unsent, 4);
   assert.equal(stats.stoppedBy, 'reverted');
   await page.close();
+});
+
+test('the browser does not announce itself as automated', async () => {
+  const { launchBrowser } = await import('../src/unsender.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(`${tmpdir()}/ig-unsend-profile-`);
+  const context = await launchBrowser(dir, { headless: true });
+  const page = context.pages()[0] ?? (await context.newPage());
+  assert.equal(await page.evaluate(() => navigator.webdriver), false);
+  await context.close();
+  await rm(dir, { recursive: true, force: true });
 });
