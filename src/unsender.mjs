@@ -32,8 +32,9 @@ async function wait(ms, shouldStop) {
 
 // Runs in the page. Instagram's markup has no roles for messages, so this finds
 // the list under data-pagelet="IGDMessagesList", tags each message row, and
-// marks rows that are right-aligned (sent by you). Returns the row count, or
-// null when the conversation is not on screen.
+// marks rows that are right-aligned (sent by you). Each row also gets a
+// fingerprint of its content, to recognize a message Instagram puts back.
+// Returns the row count, or null when the conversation is not on screen.
 function tagRows() {
   const list = document.querySelector('[data-pagelet="IGDMessagesList"]')
     ?? document.querySelector('[data-pagelet*="MessagesList"]');
@@ -69,6 +70,8 @@ function tagRows() {
   for (const row of inner.children) {
     row.setAttribute('data-unsend-row', '1');
     if (!row.hasAttribute('data-unsend-mine')) row.setAttribute('data-unsend-mine', isMine(row) ? '1' : '0');
+    const media = [...row.querySelectorAll('img, video, audio')].map((m) => m.tagName + (m.getAttribute('alt') ?? ''));
+    row.setAttribute('data-unsend-fp', `${row.textContent.trim()}|${media.join(',')}`);
   }
   return inner.children.length;
 }
@@ -124,9 +127,15 @@ async function isBlocked(page) {
     || (await page.getByRole('alert').filter({ hasText: LABELS.blocked }).filter({ visible: true }).count()) > 0;
 }
 
-// Returns 'skipped' (no Unsend in the menu), 'found' (dry run), 'unsent', or
-// 'unconfirmed' (the flow completed but the message stayed on screen).
-async function processRow(page, handle, dryRun) {
+// How many of your messages on screen have this fingerprint.
+const countMatching = (page, fp) => page.evaluate((value) => {
+  return [...document.querySelectorAll('[data-unsend-mine="1"]')].filter((r) => r.getAttribute('data-unsend-fp') === value).length;
+}, fp);
+
+// Returns 'skipped' (no Unsend in the menu), 'found' (dry run), 'unsent',
+// 'unconfirmed' (the message stayed on screen), or 'reverted' (it went away
+// and Instagram put it back, meaning its server refused the unsend).
+async function processRow(page, handle, { dryRun, settleMs }) {
   await handle.evaluate((el, attr) => el.setAttribute(attr, '1'), CURRENT);
   const row = page.locator(`[${CURRENT}]`);
   try {
@@ -147,22 +156,27 @@ async function processRow(page, handle, dryRun) {
       return unsendItem ? 'found' : 'skipped';
     }
 
-    const content = '[role="none"], [role="presentation"]';
-    const hadContent = await handle.evaluate((el, selector) => !!el.querySelector(selector), content);
+    const fp = await handle.getAttribute('data-unsend-fp');
+    const before = await countMatching(page, fp);
+    const shape = await handle.evaluate((el) => [el.textContent, el.querySelectorAll('img, video, audio').length]);
     await unsendItem.click();
     const confirm = await firstVisible(page.getByRole('dialog').getByRole('button', { name: LABELS.unsend }), 3000);
     if (confirm) await confirm.click();
 
     try {
       await page.waitForFunction(
-        ([el, selector, had]) => !el.isConnected || el.textContent.trim() === '' || (had && !el.querySelector(selector)),
-        [handle, content, hadContent],
+        ([el, [text, media]]) => !el.isConnected || el.textContent !== text || el.querySelectorAll('img, video, audio').length !== media,
+        [handle, shape],
         { timeout: 6000 },
       );
-      return 'unsent';
     } catch {
       return 'unconfirmed';
     }
+    // Instagram hides the message at once and puts it back if its server
+    // refuses, so check again after a moment.
+    await sleep(settleMs);
+    await page.evaluate(tagRows);
+    return (await countMatching(page, fp)) >= before ? 'reverted' : 'unsent';
   } finally {
     await handle.evaluate((el, [current, seen]) => {
       el.removeAttribute(current);
@@ -206,8 +220,9 @@ export async function waitForMessages(page, timeout = 30000) {
 
 // Why a run ended: 'end' (start of the conversation reached), 'limit',
 // 'stopped' (shouldStop returned true), 'blocked' (Instagram's "try again
-// later"), or 'unconfirmed' (5 unsends in a row left the message on screen).
-// onEvent receives { type: 'unsent' | 'found' | 'loading' | 'pause' | 'working', ... }.
+// later"), 'unconfirmed' (5 unsends in a row left the message on screen), or
+// 'reverted' (Instagram put 3 messages in a row back after unsending them).
+// onEvent receives { type: 'unsent' | 'found' | 'loading' | 'pause' | 'working' | 'reverted', ... }.
 export async function unsendThread(page, options = {}) {
   const {
     dryRun = false,
@@ -216,11 +231,17 @@ export async function unsendThread(page, options = {}) {
     maxDelay = 4000,
     breakEvery = 40,
     breakSeconds = 90,
+    settleMs = 1500,
+    revertBackoff = 20000,
     shouldStop = () => false,
     onEvent = () => {},
   } = options;
-  const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, stoppedBy: 'end' };
+  const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, reverted: 0, stoppedBy: 'end' };
   let failuresInARow = 0;
+  let revertsInARow = 0;
+  // Fingerprint -> times Instagram put that message back. A put-back message
+  // is a new element, so without this it would be picked again forever.
+  const revertedTimes = new Map();
 
   if (!(await waitForMessages(page))) throw new Error('Could not find the conversation messages on the page.');
 
@@ -241,8 +262,15 @@ export async function unsendThread(page, options = {}) {
       continue;
     }
 
+    const handle = await next.elementHandle();
+    const fp = await handle.getAttribute('data-unsend-fp');
+    if ((revertedTimes.get(fp) ?? 0) >= 2) {
+      await handle.evaluate((el, seen) => el.setAttribute(seen, '1'), SEEN);
+      continue;
+    }
+
     onEvent({ type: 'working' });
-    const result = await processRow(page, await next.elementHandle(), dryRun);
+    const result = await processRow(page, handle, { dryRun, settleMs });
     stats[result]++;
 
     if (await isBlocked(page)) {
@@ -255,8 +283,19 @@ export async function unsendThread(page, options = {}) {
         stats.stoppedBy = 'unconfirmed';
         break;
       }
+    } else if (result === 'reverted') {
+      revertedTimes.set(fp, (revertedTimes.get(fp) ?? 0) + 1);
+      onEvent({ type: 'reverted', inARow: ++revertsInARow });
+      if (revertsInARow >= 3) {
+        stats.stoppedBy = 'reverted';
+        break;
+      }
+      const seconds = (revertBackoff / 1000) * revertsInARow;
+      onEvent({ type: 'pause', seconds, reason: 'reverted' });
+      await wait(seconds * 1000, shouldStop);
     } else if (result === 'unsent') {
       failuresInARow = 0;
+      revertsInARow = 0;
     }
 
     if (result === 'unsent' || result === 'found') {

@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import { unsendThread, waitForMessages } from '../src/unsender.mjs';
 
 const MOCK = pathToFileURL(new URL('./mock-thread.html', import.meta.url).pathname).href;
-const FAST = { minDelay: 0, maxDelay: 0, breakEvery: 0, log: () => {} };
+const FAST = { minDelay: 0, maxDelay: 0, breakEvery: 0, settleMs: 700, revertBackoff: 0 };
 let browser;
 
 before(async () => {
@@ -69,5 +69,23 @@ test('stops safely when asked to', async () => {
   const stats = await unsendThread(page, { ...FAST, onEvent: (e) => { if (e.type === 'unsent') events++; }, shouldStop: () => events >= 2 });
   assert.equal(stats.unsent, 2);
   assert.equal(stats.stoppedBy, 'stopped');
+  await page.close();
+});
+
+test('does not count or loop on messages Instagram puts back', async () => {
+  const page = await open('?revertAfter=0');
+  const stats = await unsendThread(page, FAST);
+  assert.equal(stats.unsent, 0);
+  assert.equal(stats.reverted, 3);
+  assert.equal(stats.stoppedBy, 'reverted');
+  assert.equal((await remaining(page)).filter(Boolean).length, 20);
+  await page.close();
+});
+
+test('stops when Instagram starts putting messages back mid-run', async () => {
+  const page = await open('?revertAfter=4');
+  const stats = await unsendThread(page, FAST);
+  assert.equal(stats.unsent, 4);
+  assert.equal(stats.stoppedBy, 'reverted');
   await page.close();
 });

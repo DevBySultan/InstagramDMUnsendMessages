@@ -29,10 +29,13 @@
 </div>
 <script>
   // Options: ?portal=1 renders the hover button outside the row,
-  // ?blockAfter=N shows a "Try Again Later" dialog after N unsends.
+  // ?blockAfter=N shows a "Try Again Later" dialog after N unsends,
+  // ?revertAfter=N puts every message back after the first N unsends, the way
+  // Instagram does when its server refuses an unsend.
   const params = new URLSearchParams(location.search);
   const portal = params.has('portal');
   const blockAfter = Number(params.get('blockAfter') || Infinity);
+  const revertAfter = Number(params.get('revertAfter') ?? Infinity);
   const TOTAL = 90, PAGE = 30;
   let loaded = 0, unsent = 0, floating = null;
   window.state = { unsent: () => unsent };
@@ -70,8 +73,13 @@
         document.body.append(blocked);
         return;
       }
-      unsent++;
-      setTimeout(() => row.remove(), 200);
+      const putBack = unsent >= revertAfter;
+      if (!putBack) unsent++;
+      setTimeout(() => {
+        const parent = row.parentNode, next = row.nextSibling;
+        row.remove();
+        if (putBack) setTimeout(() => parent.insertBefore(makeRow(Number(row.dataset.index)), next), 300);
+      }, 200);
     };
     cancel.onclick = () => dialog.remove();
     document.body.append(dialog);
@@ -90,6 +98,7 @@
     const mine = isMine(i);
     const row = document.createElement('div');
     row.className = 'row';
+    row.dataset.index = i;
     const line = document.createElement('div');
     line.className = 'line' + (mine ? ' mine' : '');
     const bubble = document.createElement('div');
