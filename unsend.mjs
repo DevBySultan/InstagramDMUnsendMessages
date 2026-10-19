@@ -15,17 +15,62 @@ const INBOX_URL = 'https://www.instagram.com/direct/inbox/';
 // UI strings in English and Arabic. English is the tested path; switch the
 // Instagram web language to English if the Arabic labels do not match.
 export const LABELS = {
-  more: /^(More|More options|See more options.*|المزيد|خيارات إضافية|المزيد من الخيارات.*)$/i,
+  more: /^(See more options.*|More options.*|More|المزيد.*|خيارات.*)$/i,
   unsend: /^(Unsend|إلغاء الإرسال)$/i,
   blocked: /(try again later|action blocked|we restrict certain activity|حاول مرة أخرى لاحق|تم حظر)/i,
 };
 
-const ROW = '[role="row"]';
+// Attributes the bot puts on Instagram's elements to keep track of them.
+const ROW = '[data-unsend-row]';
+const MINE = '[data-unsend-mine="1"]';
 const SEEN = 'data-unsend-seen';
 const CURRENT = 'data-unsend-current';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const jitter = (min, max) => min + Math.random() * (max - min);
+
+// Runs in the page. Instagram's markup has no roles for messages, so this finds
+// the list under data-pagelet="IGDMessagesList", tags each message row, and
+// marks rows that are right-aligned (sent by you). Returns the row count, or
+// null when the conversation is not on screen.
+function tagRows() {
+  const list = document.querySelector('[data-pagelet="IGDMessagesList"]')
+    ?? document.querySelector('[data-pagelet*="MessagesList"]');
+  if (!list) return null;
+
+  const scrollables = [...list.querySelectorAll('div')].filter((el) => {
+    const { overflowY } = getComputedStyle(el);
+    return overflowY === 'auto' || overflowY === 'scroll';
+  });
+  const scroller = scrollables.find((el) => el.scrollHeight > el.clientHeight) ?? scrollables[0] ?? list;
+  scroller.setAttribute('data-unsend-scroller', '1');
+
+  // The rows are the children of the descendant with the most children.
+  let inner = scroller;
+  const search = (el, depth) => {
+    if (depth > 3) return;
+    for (const child of el.children) {
+      if (child.children.length > inner.children.length) inner = child;
+      search(child, depth + 1);
+    }
+  };
+  search(scroller, 0);
+
+  const isMine = (row) => {
+    const queue = [[row, 0]];
+    while (queue.length) {
+      const [el, depth] = queue.shift();
+      if (getComputedStyle(el).justifyContent === 'flex-end') return true;
+      if (depth < 8) for (const child of el.children) queue.push([child, depth + 1]);
+    }
+    return false;
+  };
+  for (const row of inner.children) {
+    row.setAttribute('data-unsend-row', '1');
+    if (!row.hasAttribute('data-unsend-mine')) row.setAttribute('data-unsend-mine', isMine(row) ? '1' : '0');
+  }
+  return inner.children.length;
+}
 
 async function firstVisible(locator, timeout) {
   const target = locator.filter({ visible: true }).first();
@@ -37,26 +82,34 @@ async function firstVisible(locator, timeout) {
   }
 }
 
-// The hover toolbar is either inside the row or rendered next to it, so look
-// inside the row first and then for a "More" button level with the row.
+// Hovers the message so Instagram shows its "See more options" button. The
+// button is inside the row, or rendered next to it at the same height.
+// Older messages can load above the row and push it off screen, so it is
+// scrolled back into view before every attempt.
 async function revealMoreButton(page, row) {
-  const box = await row.boundingBox();
-  if (!box) return null;
+  for (const xRatio of [null, 0.85, 0.6]) {
+    await row.scrollIntoViewIfNeeded().catch(() => {});
+    const box = await row.boundingBox();
+    if (!box) return null;
+    const bubble = xRatio === null
+      ? await row.locator('[role="none"], [role="presentation"]').last().boundingBox({ timeout: 500 }).catch(() => null)
+      : null;
+    const [x, y] = bubble
+      ? [bubble.x + bubble.width / 2, bubble.y + bubble.height / 2]
+      : [box.x + box.width * (xRatio ?? 0.85), box.y + box.height / 2];
+    await page.mouse.move(x, y, { steps: 3 });
 
-  for (const xRatio of [0.5, 0.8, 0.2]) {
-    await page.mouse.move(box.x + box.width * xRatio, box.y + box.height / 2);
     const inRow = await firstVisible(
-      row.getByRole('button', { name: LABELS.more }).or(row.getByLabel(LABELS.more)),
-      600,
+      row.getByLabel(LABELS.more).or(row.locator('[role="button"][aria-haspopup="menu"]')),
+      700,
     );
     if (inRow) return inRow;
 
-    const nearby = page.getByRole('button', { name: LABELS.more }).or(page.getByLabel(LABELS.more));
-    for (const candidate of await nearby.filter({ visible: true }).all()) {
+    for (const candidate of await page.getByLabel(LABELS.more).filter({ visible: true }).all()) {
       const b = await candidate.boundingBox();
       if (!b) continue;
-      const centerY = b.y + b.height / 2;
       const centerX = b.x + b.width / 2;
+      const centerY = b.y + b.height / 2;
       if (centerY >= box.y - 8 && centerY <= box.y + box.height + 8 && centerX >= box.x && centerX <= box.x + box.width) {
         return candidate;
       }
@@ -70,18 +123,17 @@ async function isBlocked(page) {
     || (await page.getByRole('alert').filter({ hasText: LABELS.blocked }).filter({ visible: true }).count()) > 0;
 }
 
-// Returns 'skipped' (not yours / nothing to unsend), 'found' (dry run),
-// 'unsent', or 'unconfirmed' (the flow completed but the row did not go away).
+// Returns 'skipped' (no Unsend in the menu), 'found' (dry run), 'unsent', or
+// 'unconfirmed' (the flow completed but the message stayed on screen).
 async function processRow(page, handle, dryRun) {
   await handle.evaluate((el, attr) => el.setAttribute(attr, '1'), CURRENT);
   const row = page.locator(`[${CURRENT}]`);
   try {
-    await handle.scrollIntoViewIfNeeded();
     const more = await revealMoreButton(page, row);
     if (!more) return 'skipped';
 
     await more.click();
-    // Once the menu is open, a missing "Unsend" means the message is not yours.
+    // Once the menu is open, a missing "Unsend" means it cannot be unsent.
     const menu = await firstVisible(page.locator('[role="menu"], [role="dialog"]'), 2500);
     const unsendItem = await firstVisible(
       page.getByRole('menuitem', { name: LABELS.unsend })
@@ -94,12 +146,18 @@ async function processRow(page, handle, dryRun) {
       return unsendItem ? 'found' : 'skipped';
     }
 
+    const content = '[role="none"], [role="presentation"]';
+    const hadContent = await handle.evaluate((el, selector) => !!el.querySelector(selector), content);
     await unsendItem.click();
     const confirm = await firstVisible(page.getByRole('dialog').getByRole('button', { name: LABELS.unsend }), 3000);
     if (confirm) await confirm.click();
 
     try {
-      await page.waitForFunction((el) => !el.isConnected, handle, { timeout: 6000 });
+      await page.waitForFunction(
+        ([el, selector, had]) => !el.isConnected || el.textContent.trim() === '' || (had && !el.querySelector(selector)),
+        [handle, content, hadContent],
+        { timeout: 6000 },
+      );
       return 'unsent';
     } catch {
       return 'unconfirmed';
@@ -113,22 +171,36 @@ async function processRow(page, handle, dryRun) {
 }
 
 // Scrolls to the oldest loaded message so Instagram loads older ones.
-// Returns true when new rows showed up.
+// Returns true when new messages showed up.
 async function loadOlder(page, attempts = 4) {
   for (let i = 0; i < attempts; i++) {
-    const before = await page.locator(ROW).count();
-    const top = page.locator(ROW).first();
-    await top.scrollIntoViewIfNeeded().catch(() => {});
-    const box = await top.boundingBox();
+    const before = await page.evaluate(tagRows);
+    await page.evaluate(() => {
+      const scroller = document.querySelector('[data-unsend-scroller]');
+      if (!scroller) return;
+      const reversed = getComputedStyle(scroller).flexDirection === 'column-reverse';
+      scroller.scrollTop = reversed ? -(scroller.scrollHeight - scroller.clientHeight) : 0;
+    });
+    const box = await page.locator('[data-unsend-scroller]').boundingBox();
     if (box) {
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.move(box.x + box.width / 2, box.y + 40);
       await page.mouse.wheel(0, -3000);
     }
     await sleep(1500 + i * 1500);
-    const unseen = await page.locator(`${ROW}:not([${SEEN}])`).count();
-    if (unseen > 0 || (await page.locator(ROW).count()) > before) return true;
+    const after = await page.evaluate(tagRows);
+    if (after > before || (await page.locator(`${ROW}${MINE}:not([${SEEN}])`).count()) > 0) return true;
   }
   return false;
+}
+
+// Waits until the conversation's messages are on screen.
+export async function waitForMessages(page, timeout = 30000) {
+  try {
+    await page.waitForFunction(tagRows, null, { timeout, polling: 1000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function unsendThread(page, options = {}) {
@@ -144,14 +216,15 @@ export async function unsendThread(page, options = {}) {
   const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, stoppedBy: 'end of conversation' };
   let failuresInARow = 0;
 
-  await page.locator(ROW).first().waitFor({ timeout: 30000 });
+  if (!(await waitForMessages(page))) throw new Error('Could not find the conversation messages on the page.');
 
   while (true) {
     if (stats.unsent + stats.found >= limit) {
       stats.stoppedBy = `reached --limit ${limit}`;
       break;
     }
-    const next = page.locator(`${ROW}:not([${SEEN}])`).last();
+    await page.evaluate(tagRows);
+    const next = page.locator(`${ROW}${MINE}:not([${SEEN}])`).last();
     if ((await next.count()) === 0) {
       if (!(await loadOlder(page))) break;
       continue;
@@ -176,7 +249,7 @@ export async function unsendThread(page, options = {}) {
 
     if (result === 'unsent' || result === 'found') {
       const done = stats.unsent + stats.found;
-      log(`${dryRun ? 'Would unsend' : 'Unsent'} #${done} (other messages skipped: ${stats.skipped})`);
+      log(`${dryRun ? 'Would unsend' : 'Unsent'} #${done}`);
       if (!dryRun && breakEvery > 0 && done % breakEvery === 0) {
         log(`Pausing ${breakSeconds}s to stay under Instagram's rate limits...`);
         await sleep(breakSeconds * 1000);
@@ -189,29 +262,34 @@ export async function unsendThread(page, options = {}) {
   return stats;
 }
 
-// Writes the roles and aria-labels near the thread (no message text) so the
+// Writes the structure and labels of the page (no message text) so the
 // selectors can be fixed if Instagram changes its markup.
 async function inspect(page) {
-  await page.waitForTimeout(3000);
-  const last = page.locator(ROW).last();
+  const rows = await page.evaluate(tagRows);
+  const last = page.locator(`${ROW}${MINE}`).last();
   if (await last.count()) {
+    await last.scrollIntoViewIfNeeded();
     const box = await last.boundingBox();
-    if (box) await page.mouse.move(box.x + box.width * 0.8, box.y + box.height / 2);
+    if (box) await page.mouse.move(box.x + box.width * 0.85, box.y + box.height / 2);
     await page.waitForTimeout(800);
   }
   const report = await page.evaluate(() => ({
     url: location.href,
-    rows: document.querySelectorAll('[role="row"]').length,
-    grids: [...document.querySelectorAll('[role="grid"]')].map((g) => g.getAttribute('aria-label')),
+    pagelets: [...document.querySelectorAll('[data-pagelet]')].map((el) => el.getAttribute('data-pagelet')),
+    rows: document.querySelectorAll('[data-unsend-row]').length,
+    yourRows: document.querySelectorAll('[data-unsend-mine="1"]').length,
+    dialogs: [...document.querySelectorAll('[role="dialog"]')].map((el) => el.getAttribute('aria-label')),
     labelled: [...document.querySelectorAll('[aria-label], [role="button"], [role="menuitem"]')]
       .filter((el) => el.getBoundingClientRect().width > 0)
       .map((el) => ({ tag: el.tagName.toLowerCase(), role: el.getAttribute('role'), label: el.getAttribute('aria-label') }))
       .filter((el) => el.label),
   }));
+  report.rows = rows ?? 0;
   await mkdir(path.join(ROOT, 'debug'), { recursive: true });
   const file = path.join(ROOT, 'debug', `inspect-${Date.now()}.json`);
   await writeFile(file, JSON.stringify(report, null, 2));
-  console.log(`Found ${report.rows} message rows. Report saved to ${file}`);
+  console.log(`Found ${report.rows} messages, ${report.yourRows} of them yours. Report saved to ${file}`);
+  return file;
 }
 
 async function launch(headless) {
@@ -262,6 +340,17 @@ async function main() {
       throw new Error(`Not a conversation URL: ${threadUrl}`);
     }
 
+    // Instagram can show popups after logging in (save login info, PIN, notifications).
+    while (!(await waitForMessages(page))) {
+      const file = await inspect(page);
+      await rl.question(
+        'Could not find the messages of the conversation.\n'
+        + '  - Close any Instagram popup in the window and make sure the conversation is open.\n'
+        + `  - If this keeps happening, send the file ${file}\n`
+        + 'Press Enter to try again, or Ctrl+C to quit... ',
+      );
+    }
+
     if (values.inspect) return await inspect(page);
 
     const dryRun = values['dry-run'];
@@ -286,10 +375,14 @@ async function main() {
     });
     console.log(
       dryRun
-        ? `Dry run done. Your messages found: ${stats.found}. Other messages skipped: ${stats.skipped}.`
-        : `Done. Unsent: ${stats.unsent}. Unconfirmed: ${stats.unconfirmed}. Other messages skipped: ${stats.skipped}.`,
+        ? `Dry run done. Your messages found: ${stats.found}.`
+        : `Done. Unsent: ${stats.unsent}. Unconfirmed: ${stats.unconfirmed}.`,
     );
+    if (stats.skipped) console.log(`Messages that looked like yours but had no Unsend option: ${stats.skipped}.`);
     console.log(`Stopped because: ${stats.stoppedBy}`);
+    if (stats.unsent + stats.found === 0) {
+      console.log(`Nothing found. Send the file ${await inspect(page)}`);
+    }
   } finally {
     rl.close();
     await context.close();

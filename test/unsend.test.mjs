@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { unsendThread } from '../unsend.mjs';
+import { unsendThread, waitForMessages } from '../unsend.mjs';
 
 const MOCK = pathToFileURL(new URL('./mock-thread.html', import.meta.url).pathname).href;
 const FAST = { minDelay: 0, maxDelay: 0, breakEvery: 0, log: () => {} };
@@ -19,7 +19,7 @@ async function open(query = '') {
   return page;
 }
 
-const remaining = (page) => page.$$eval('[role="row"]', (rows) => rows.map((r) => r.classList.contains('mine')));
+const remaining = (page) => page.$$eval('.row', (rows) => rows.map((r) => !!r.querySelector('.mine')));
 
 test('unsends every own message across older pages and keeps the other side', async () => {
   const page = await open();
@@ -53,5 +53,12 @@ test('stops when Instagram blocks the action', async () => {
   const stats = await unsendThread(page, FAST);
   assert.equal(stats.unsent, 3);
   assert.match(stats.stoppedBy, /blocked/);
+  await page.close();
+});
+
+test('reports when the conversation is not on the page', async () => {
+  const page = await browser.newPage();
+  await page.setContent('<p>Save your login info?</p>');
+  assert.equal(await waitForMessages(page, 1500), false);
   await page.close();
 });

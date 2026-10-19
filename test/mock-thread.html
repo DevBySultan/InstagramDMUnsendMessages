@@ -3,30 +3,37 @@
 <head>
 <meta charset="utf-8">
 <title>Mock DM thread</title>
+<!-- Mirrors the markup of instagram.com DMs in 2026: no roles on messages,
+     a column-reverse list under data-pagelet="IGDMessagesList", your messages
+     right-aligned with flex-end, and a "See more options" button on hover. -->
 <style>
   body { margin: 0; display: flex; height: 100vh; font: 14px sans-serif; }
   nav { width: 200px; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px; }
+  [data-pagelet] { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #frame { flex: 1; display: flex; min-height: 0; }
   #scroller { flex: 1; overflow-y: auto; display: flex; flex-direction: column-reverse; }
-  [role="row"] { position: relative; display: flex; padding: 6px 60px; }
-  [role="row"].mine { justify-content: flex-end; }
+  .row { position: relative; padding: 6px 60px; }
+  .line { display: flex; align-items: center; gap: 6px; }
+  .line.mine { justify-content: flex-end; }
   .bubble { padding: 6px 10px; border-radius: 12px; background: #eee; }
-  .toolbar { display: none; }
-  [role="row"]:hover .toolbar { display: inline-flex; }
+  .toolbar { visibility: hidden; }
+  .row:hover .toolbar { visibility: visible; }
   .floating { position: fixed; }
   [role="menu"], [role="dialog"] { position: fixed; top: 40%; left: 45%; background: #fff; border: 1px solid #999; padding: 8px; }
 </style>
 </head>
 <body>
-<nav><div role="button" aria-label="More">More</div></nav>
-<div id="scroller"><div role="grid" aria-label="Messages" id="grid"><div id="sentinel" style="height:1px"></div></div></div>
+<nav><div role="button"><svg aria-label="Settings" width="16" height="16"></svg><span>More</span></div></nav>
+<div data-pagelet="IGDMessagesList">
+  <div id="frame"><div id="scroller"><div><div id="list"><div id="sentinel" style="height:1px"></div></div></div></div></div>
+</div>
 <script>
-  // Options: ?portal=1 renders the hover toolbar outside the row,
+  // Options: ?portal=1 renders the hover button outside the row,
   // ?blockAfter=N shows a "Try Again Later" dialog after N unsends.
   const params = new URLSearchParams(location.search);
   const portal = params.has('portal');
   const blockAfter = Number(params.get('blockAfter') || Infinity);
   const TOTAL = 90, PAGE = 30;
-  const grid = document.getElementById('grid');
   let loaded = 0, unsent = 0, floating = null;
   window.state = { unsent: () => unsent };
 
@@ -34,15 +41,14 @@
 
   function closeMenus() { document.querySelectorAll('[role="menu"], [role="dialog"]').forEach((m) => m.remove()); }
 
-  function openMenu(row) {
+  function openMenu(row, mine) {
     closeMenus();
     const menu = document.createElement('div');
     menu.setAttribute('role', 'menu');
-    const items = ['Forward', 'Copy'].concat(row.classList.contains('mine') ? ['Unsend'] : ['Report']);
-    for (const name of items) {
+    for (const name of ['Forward', 'Copy', mine ? 'Unsend' : 'Report']) {
       const item = document.createElement('div');
       item.setAttribute('role', 'menuitem');
-      item.textContent = name;
+      item.innerHTML = `<span>${name}</span>`;
       if (name === 'Unsend') item.onclick = () => confirmUnsend(row);
       menu.append(item);
     }
@@ -71,43 +77,48 @@
     document.body.append(dialog);
   }
 
-  function moreButton(row) {
+  function moreButton(row, mine, i) {
     const button = document.createElement('div');
     button.setAttribute('role', 'button');
-    button.innerHTML = '<svg aria-label="More" width="16" height="16"><circle cx="8" cy="8" r="6"/></svg>';
-    button.onclick = (event) => { event.stopPropagation(); openMenu(row); };
+    button.setAttribute('aria-haspopup', 'menu');
+    button.innerHTML = `<svg aria-label="See more options for message from ${mine ? 'you' : 'them'}" width="16" height="16"><circle cx="8" cy="8" r="6"/></svg>`;
+    button.onclick = (event) => { event.stopPropagation(); openMenu(row, mine); };
     return button;
   }
 
   function makeRow(i) {
+    const mine = isMine(i);
     const row = document.createElement('div');
-    row.setAttribute('role', 'row');
-    row.dataset.index = i;
-    if (isMine(i)) row.classList.add('mine');
+    row.className = 'row';
+    const line = document.createElement('div');
+    line.className = 'line' + (mine ? ' mine' : '');
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = (isMine(i) ? 'me ' : 'them ') + i;
+    bubble.setAttribute('role', 'none');
+    bubble.textContent = (mine ? 'me ' : 'them ') + i;
     if (portal) {
       row.onmouseenter = () => {
         floating?.remove();
-        floating = moreButton(row);
+        floating = moreButton(row, mine, i);
         floating.className = 'floating';
         const box = row.getBoundingClientRect();
         floating.style.top = box.top + 4 + 'px';
-        floating.style.left = (isMine(i) ? box.right - 50 : box.left + 220) + 'px';
+        floating.style.left = (mine ? box.right - 50 : box.left + 220) + 'px';
         document.body.append(floating);
       };
-      row.append(bubble);
+      line.append(bubble);
     } else {
       const toolbar = document.createElement('span');
       toolbar.className = 'toolbar';
-      toolbar.append(moreButton(row));
-      if (isMine(i)) row.append(toolbar, bubble); else row.append(bubble, toolbar);
+      toolbar.append(moreButton(row, mine, i));
+      if (mine) line.append(toolbar, bubble); else line.append(bubble, toolbar);
     }
+    row.append(line);
     return row;
   }
 
-  // Newest messages have the highest index; older pages are prepended.
+  // Newest messages have the highest index; older pages are added on top
+  // when the top of the list comes into view.
   function loadPage() {
     const end = TOTAL - loaded, start = Math.max(0, end - PAGE);
     const frag = document.createDocumentFragment();
@@ -116,7 +127,6 @@
     loaded += end - start;
   }
 
-  // Like Instagram, older messages load when the top of the list comes into view.
   loadPage();
   new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting && loaded < TOTAL) setTimeout(loadPage, 300);

@@ -25,7 +25,7 @@ npm install
    npm start -- "https://www.instagram.com/direct/t/1234567890/" --dry-run --limit 5
    ```
 
-   On the first run, log in inside the window that opens, then press Enter in the terminal.
+   On the first run, log in inside the window that opens, then press Enter in the terminal. If Instagram shows a popup after logging in (save login info, notifications, a PIN), close it in the window. If the bot cannot find the messages, it saves a report to `debug/` and waits for you to press Enter to try again.
 4. Try a real run on a few messages, then on the whole conversation:
 
    ```bash
