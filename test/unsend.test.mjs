@@ -91,14 +91,18 @@ test('stops when Instagram starts putting messages back mid-run', async () => {
   await page.close();
 });
 
-test('the browser does not announce itself as automated', async () => {
-  const { launchBrowser } = await import('../src/unsender.mjs');
+test('the browser starts as plain Chrome and does not announce itself as automated', async () => {
+  const { launchBrowser } = await import('../src/browser.mjs');
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const dir = await mkdtemp(`${tmpdir()}/ig-unsend-profile-`);
-  const context = await launchBrowser(dir, { headless: true });
-  const page = context.pages()[0] ?? (await context.newPage());
+  const session = await launchBrowser(dir, { headless: true });
+  const page = session.context.pages()[0] ?? (await session.context.newPage());
+  await page.setContent('<p>x</p>');
   assert.equal(await page.evaluate(() => navigator.webdriver), false);
-  await context.close();
+  let closed = false;
+  session.onClose(() => { closed = true; });
+  await session.close();
+  assert.equal(closed, true);
   await rm(dir, { recursive: true, force: true });
 });

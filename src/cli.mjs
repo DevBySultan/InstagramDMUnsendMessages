@@ -7,8 +7,9 @@ import { rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
-  INBOX_URL, inspect, isLoginPage, launchBrowser, pageLanguage, unsendThread, waitForMessages,
+  INBOX_URL, inspect, isLoginPage, pageLanguage, unsendThread, waitForMessages,
 } from './unsender.mjs';
+import { launchBrowser } from './browser.mjs';
 import { Settings, SPEEDS } from './settings.mjs';
 import * as ui from './ui.mjs';
 
@@ -27,35 +28,29 @@ const VERSION = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')
 const CONVERSATION_URL = /^https:\/\/(www\.)?instagram\.com\/direct\/t\/(\d+)\/?(\?.*)?$/;
 
 const settings = new Settings(ROOT);
-let context = null;
+let browser = null;
 let page = null;
 
 // ---------- Browser ----------
 
 async function getPage() {
   if (page && !page.isClosed()) return page;
-  if (!context) {
+  if (!browser) {
     ui.info('Opening the browser window...');
-    try {
-      context = await launchBrowser(PROFILE, { headless: !!process.env.IG_UNSEND_HEADLESS });
-    } catch (error) {
-      if (/Executable doesn't exist|browserType.launch/i.test(error.message)) {
-        throw new Error('No browser found. Install Google Chrome, or run: npx playwright install chromium');
-      }
-      throw error;
-    }
-    context.on('close', () => {
-      context = null;
+    browser = await launchBrowser(PROFILE, { headless: !!process.env.IG_UNSEND_HEADLESS });
+    browser.onClose(() => {
+      browser = null;
       page = null;
     });
   }
-  page = context.pages()[0] ?? (await context.newPage());
+  const pages = browser.context.pages();
+  page = pages.find((p) => p.url().includes('instagram.com')) ?? pages[0] ?? (await browser.context.newPage());
   return page;
 }
 
 async function closeBrowser() {
-  if (context) await context.close().catch(() => {});
-  context = null;
+  if (browser) await browser.close().catch(() => {});
+  browser = null;
   page = null;
 }
 

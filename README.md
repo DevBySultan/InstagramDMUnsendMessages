@@ -20,6 +20,7 @@ A command-line tool that unsends **your own** messages in an Instagram DM conver
 
 Gold on dark in terminals with 24-bit color (Windows Terminal, modern cmd), plain yellow elsewhere. Choose with the arrow keys or the item's number, then Enter.
 
+- Opens your installed Google Chrome as plain Chrome, with its own profile, and controls it from the terminal. It does not use the automation switches test tools add, which Instagram can treat differently from a normal browser.
 - Runs only on your computer. You log in to Instagram yourself, in the browser window. Your password is never typed into the tool or saved by it.
 - Touches only the conversation you choose, and only messages whose menu offers **Unsend**.
 - **Unsending is permanent.** If you might want a copy, download it first (Instagram → Settings → Your activity → Download your information).
@@ -79,6 +80,7 @@ Settings and the recent conversations are saved in `settings.json` in the tool's
 | `bin/ig-unsend.mjs` | The `ig-unsend` command |
 | `src/cli.mjs` | Menus, choosing a conversation, progress and summary |
 | `src/unsender.mjs` | Browser automation: finding your messages and unsending them |
+| `src/browser.mjs` | Starts Google Chrome as plain Chrome (no automation switches) and connects to it |
 | `src/settings.mjs` | Speed presets, limit and recent conversations |
 | `src/ui.mjs` | Terminal output helpers |
 | `test/` | Tests against a local copy of a DM page (`mock-thread.html`), not against Instagram |

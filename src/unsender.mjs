@@ -1,7 +1,6 @@
 // Unsends your own messages in one Instagram DM conversation by driving the
 // regular instagram.com web UI in a browser window on your own computer.
 
-import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -354,29 +353,6 @@ export async function inspect(page, dir) {
   const file = path.join(dir, `inspect-${Date.now()}.json`);
   await writeFile(file, JSON.stringify(report, null, 2));
   return { file, rows: report.rows, yourRows: report.yourRows };
-}
-
-// Opens a browser window that keeps its own Instagram login in profileDir.
-// Uses the installed Google Chrome, or Playwright's Chromium without it.
-export async function launchBrowser(profileDir, { headless = false } = {}) {
-  // Without these, Chrome tells every site it is automated (navigator.webdriver
-  // and the "controlled by automated test software" bar), which Instagram can
-  // use to refuse actions.
-  const base = {
-    headless,
-    viewport: null,
-    args: ['--start-maximized', '--disable-blink-features=AutomationControlled'],
-    ignoreDefaultArgs: ['--enable-automation'],
-    handleSIGINT: false,
-  };
-  if (process.env.PW_CHROMIUM_PATH) {
-    return chromium.launchPersistentContext(profileDir, { ...base, executablePath: process.env.PW_CHROMIUM_PATH });
-  }
-  try {
-    return await chromium.launchPersistentContext(profileDir, { ...base, channel: 'chrome' });
-  } catch {
-    return chromium.launchPersistentContext(profileDir, base);
-  }
 }
 
 export const isLoginPage = (page) => /\/accounts\/login|\/challenge\//.test(page.url());
