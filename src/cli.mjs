@@ -1,7 +1,7 @@
 // The interactive terminal app: menus, choosing a conversation, running and
 // reporting. The browser automation lives in unsender.mjs.
 
-import { select, input, number, confirm, Separator } from '@inquirer/prompts';
+import * as prompts from '@inquirer/prompts';
 import { existsSync, readFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +12,14 @@ import {
 import { Settings, SPEEDS } from './settings.mjs';
 import * as ui from './ui.mjs';
 
-const { pc } = ui;
+const { gold, pale, bronze, ivory, sage, amber, bold } = ui;
+
+// Every prompt uses the app's theme.
+const themed = (prompt) => (config) => prompt({ ...config, theme: ui.theme });
+const select = themed(prompts.select);
+const input = themed(prompts.input);
+const number = themed(prompts.number);
+const confirm = themed(prompts.confirm);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE = path.join(ROOT, '.browser-profile');
 const DEBUG = path.join(ROOT, 'debug');
@@ -111,7 +118,7 @@ async function chooseConversation() {
       pageSize: 12,
       choices: [
         ...recent,
-        ...(recent.length ? [new Separator()] : []),
+        ...(recent.length ? [ui.divider()] : []),
         { name: 'Paste a conversation link', value: 'paste', description: 'Open the chat on instagram.com and copy the address bar' },
         { name: 'Pick it in the browser window', value: 'pick', description: 'Open your inbox in the browser and click the chat' },
         { name: 'Back', value: 'back' },
@@ -151,6 +158,7 @@ const REASONS = {
   end: ['ok', 'Reached the start of the conversation.'],
   limit: ['ok', 'Reached the limit for this run.'],
   stopped: ['warn', 'You stopped it. Run it again to continue where it left off.'],
+  reverted: ['fail', 'Instagram put your messages back right after unsending them: its server refused the unsend.'],
   blocked: ['fail', 'Instagram said "Try again later". Wait a few hours (a day is safer), then use the Safe speed.'],
   unconfirmed: ['fail', 'Messages stopped disappearing after Unsend. Run Diagnose and send the report.'],
 };
@@ -167,37 +175,36 @@ async function runUnsend({ dryRun }) {
   if (dryRun) {
     limit = await number({ message: 'How many of your messages to check?', default: 5, min: 1, required: true });
   } else {
-    console.log();
+    ui.blank();
     ui.table([
-      ['Conversation', label(target)],
-      ['Speed', `${speed.name} ${pc.dim(`(${speed.summary})`)}`],
+      ['Conversation', gold(label(target))],
+      ['Speed', `${speed.name} ${bronze(`(${speed.summary})`)}`],
       ['Limit', Number.isFinite(limit) ? `${limit} messages` : 'Whole conversation'],
     ]);
-    console.log();
+    ui.blank();
     ui.warn('This removes your messages for both sides. It cannot be undone.');
-    const answer = await input({ message: `Type ${pc.bold('UNSEND')} to start, or press Enter to cancel:` });
+    const answer = await input({ message: `Type ${bold('UNSEND')} to start, or press Enter to cancel:` });
     if (answer.trim() !== 'UNSEND') {
       ui.info('Cancelled. Nothing was changed.');
       return;
     }
   }
 
-  console.log();
+  ui.blank();
   ui.note('Press Ctrl+C to stop safely. You can minimize the browser window, but do not close it.');
-  console.log();
+  ui.blank();
 
   const status = new ui.StatusLine();
   const started = Date.now();
   let count = 0;
   let stopRequested = false;
-  let state = () => 'Starting';
+  let state = () => ivory('Starting');
   const render = () => {
     const elapsed = Date.now() - started;
     const rate = elapsed > 10000 ? `${(count / (elapsed / 60000)).toFixed(1)}/min` : '-';
-    const sep = pc.dim(' · ');
     status.update(
-      `  ${pc.green(dryRun ? 'Found' : 'Unsent')} ${pc.bold(String(count))}${sep}${rate}${sep}${ui.duration(elapsed)}${sep}`
-      + (stopRequested ? pc.yellow('Stopping after the current message...') : state()),
+      [`${bronze(dryRun ? 'Found' : 'Unsent')} ${bold(gold(String(count)))}`, ivory(rate), ivory(ui.duration(elapsed))],
+      stopRequested ? amber('Stopping after the current message') : state(),
     );
   };
   const onSigint = async () => {
@@ -211,16 +218,18 @@ async function runUnsend({ dryRun }) {
   };
   const onEvent = (event) => {
     if (event.type === 'unsent' || event.type === 'found') count = event.count;
-    if (event.type === 'loading') state = () => 'Loading older messages';
+    if (event.type === 'loading') state = () => ivory('Loading older messages');
+    else if (event.type === 'reverted') state = () => amber('Instagram put a message back');
     else if (event.type === 'pause') {
       const until = Date.now() + event.seconds * 1000;
-      state = () => `Short break to avoid a block (${Math.max(0, Math.ceil((until - Date.now()) / 1000))}s)`;
-    } else state = () => 'Working';
+      const why = event.reason === 'reverted' ? 'Instagram put a message back, waiting' : 'Short break to avoid a block';
+      state = () => (event.reason === 'reverted' ? amber : ivory)(`${why} (${Math.max(0, Math.ceil((until - Date.now()) / 1000))}s)`);
+    } else state = () => ivory('Working');
     render();
   };
 
   process.on('SIGINT', onSigint);
-  const timer = setInterval(render, 1000);
+  const timer = setInterval(render, 250);
   let stats;
   try {
     // A test run deletes nothing, so it does not need to wait between messages.
@@ -233,19 +242,25 @@ async function runUnsend({ dryRun }) {
     status.end();
   }
 
-  console.log();
+  ui.blank();
   const [kind, reason] = REASONS[stats.stoppedBy] ?? ['info', stats.stoppedBy];
-  ui[kind](dryRun ? 'Test run finished.' : 'Finished.');
-  console.log();
-  ui.table([
-    [dryRun ? 'Your messages found' : 'Unsent', pc.bold(String(dryRun ? stats.found : stats.unsent))],
-    ...(stats.unconfirmed ? [['Not confirmed', pc.yellow(String(stats.unconfirmed))]] : []),
-    ...(stats.skipped ? [['Had no Unsend option', String(stats.skipped)]] : []),
-    ['Time', ui.duration(Date.now() - started)],
-    ['Why it stopped', reason],
+  const tint = { ok: sage, warn: amber, fail: ui.wine }[kind] ?? ivory;
+  ui.ledger(dryRun ? 'Test run' : 'The record', [
+    [dryRun ? 'Your messages found' : 'Unsent', bold(gold(String(dryRun ? stats.found : stats.unsent)))],
+    ...(stats.reverted ? [['Put back by Instagram', amber(String(stats.reverted))]] : []),
+    ...(stats.unconfirmed ? [['Not confirmed', amber(String(stats.unconfirmed))]] : []),
+    ...(stats.skipped ? [['Had no Unsend option', ivory(String(stats.skipped))]] : []),
+    ['Time', ivory(ui.duration(Date.now() - started))],
+    ['Ended', tint(kind === 'ok' ? 'Completed' : kind === 'warn' ? 'Stopped' : 'Interrupted')],
   ]);
-  console.log();
-  if (stats.unsent + stats.found === 0 && stats.stoppedBy !== 'stopped') {
+  ui.blank();
+  ui[kind](reason);
+  if (stats.stoppedBy === 'reverted') {
+    ui.note('Usually a temporary limit on your account, or this conversation does not allow');
+    ui.note('unsending (for example the other person blocked or restricted you).');
+    ui.note('Check: unsend one message by hand in the Instagram app. If it also comes back,');
+    ui.note('it is Instagram, not this tool. Wait 24 hours, then try again on Safe speed.');
+  } else if (stats.unsent + stats.found === 0 && stats.stoppedBy !== 'stopped') {
     ui.warn('Nothing was found. Run Diagnose from the menu and send the report.');
   } else if (dryRun) {
     ui.info('It works. Choose "Unsend my messages" from the menu to do it for real.');
@@ -257,19 +272,19 @@ async function diagnose() {
   ui.title('Diagnose');
   ui.note('Saves the structure and button names of the page to a file, to fix the tool if Instagram changed.');
   ui.note('The file has no message text.');
-  console.log();
+  ui.blank();
   const target = await chooseConversation();
   if (!target) return;
   const current = await openConversation(target.url);
   if (!current) return;
   const report = await inspect(current, DEBUG);
-  console.log();
+  ui.blank();
   ui.table([
     ['Messages on screen', String(report.rows)],
     ['Yours', String(report.yourRows)],
     ['Report', report.file],
   ]);
-  console.log();
+  ui.blank();
   if (report.yourRows === 0) ui.warn('None of your messages were recognized. Send the report file for a fix.');
   else ui.ok('Your messages are recognized.');
 }
@@ -281,9 +296,10 @@ async function settingsMenu() {
     const choice = await select({
       message: 'Change a setting:',
       choices: [
-        { name: `Speed               ${pc.cyan(speed.name)}`, value: 'speed', description: speed.summary },
+        { name: `Speed               ${gold(speed.name)}`, short: 'Speed', value: 'speed', description: speed.summary },
         {
-          name: `Messages per run    ${pc.cyan(settings.limit ? String(settings.limit) : 'No limit')}`,
+          name: `Messages per run    ${gold(settings.limit ? String(settings.limit) : 'No limit')}`,
+          short: 'Messages per run',
           value: 'limit',
           description: 'Stop after this many messages, to spread a big conversation over several days',
         },
@@ -296,7 +312,7 @@ async function settingsMenu() {
         message: 'Speed:',
         default: settings.speed,
         choices: Object.entries(SPEEDS).map(([value, s]) => ({
-          name: value === 'safe' ? `${s.name} ${pc.dim('(recommended)')}` : s.name,
+          name: value === 'safe' ? `${s.name} ${bronze('(recommended)')}` : s.name,
           value,
           description: s.summary,
         })),
@@ -336,15 +352,16 @@ function help() {
     'If the test finds your messages, choose "Unsend my messages" and type UNSEND.',
     'Leave the browser window open (minimizing is fine). Ctrl+C stops safely; running again continues.',
   ];
-  steps.forEach((step, i) => console.log(`  ${pc.cyan(`${i + 1}.`)} ${step}`));
+  steps.forEach((step, i) => console.log(`  ${gold(`${['I', 'II', 'III', 'IV'][i]}.`.padEnd(4))} ${ivory(step)}`));
   ui.title('Good to know');
   [
     'Only your own messages can be unsent. The other person\'s messages stay.',
     'Unsending is permanent. It does not undo screenshots or downloads the other person made.',
     'Instagram limits how fast you can act. If it says "Try again later", wait a day and use the Safe speed.',
+    'If messages vanish and come right back, Instagram refused the unsend. The tool stops; wait a day.',
     'Automating Instagram is against its Terms of Use. The tool is slow on purpose, but the risk is not zero.',
     'Keep Instagram in English for the best results.',
-  ].forEach((line) => console.log(`  ${pc.dim('•')} ${line}`));
+  ].forEach((line) => console.log(`  ${gold('♦')} ${ivory(line)}`));
 }
 
 // ---------- Main menu ----------
@@ -353,23 +370,23 @@ export async function main() {
   await settings.load();
   try {
     while (true) {
-      ui.banner(VERSION);
-      console.log(
-        `  ${pc.dim('Speed')} ${settings.speedProfile.name}   ${pc.dim('Limit')} ${settings.limit || 'None'}   `
-        + `${pc.dim('Saved login')} ${existsSync(PROFILE) ? pc.green('Yes') : 'No'}\n`,
-      );
+      ui.banner(VERSION, ui.ribbon([
+        ['Speed', settings.speedProfile.name],
+        ['Limit', settings.limit ? String(settings.limit) : 'None'],
+        ['Saved login', existsSync(PROFILE) ? 'Yes' : 'No'],
+      ]));
       const action = await select({
         message: 'What do you want to do?',
         pageSize: 10,
         choices: [
           { name: 'Test run', value: 'test', description: 'Check a few of your messages in a conversation. Nothing is deleted.' },
           { name: 'Unsend my messages', value: 'unsend', description: 'Unsend your messages in a conversation, for both sides.' },
-          new Separator(),
+          ui.divider(),
           { name: 'Settings', value: 'settings', description: 'Speed and messages per run.' },
           { name: 'Diagnose', value: 'diagnose', description: 'Save a report if the tool cannot find your messages.' },
           { name: 'Log out', value: 'logout', description: 'Delete the saved Instagram login on this computer.' },
           { name: 'Help', value: 'help', description: 'How to use it, and what to know before you start.' },
-          new Separator(),
+          ui.divider(),
           { name: 'Exit', value: 'exit' },
         ],
       });
@@ -384,12 +401,12 @@ export async function main() {
         else help();
       } catch (error) {
         if (error.name === 'ExitPromptError') throw error;
-        console.log();
+        ui.blank();
         ui.fail(/has been closed/i.test(error.message) ? 'The browser window was closed.' : error.message.split('\n')[0]);
       }
       if (action !== 'settings') {
-        console.log();
-        await input({ message: pc.dim('Press Enter to go back to the menu') });
+        ui.blank();
+        await input({ message: 'Press Enter to return to the menu' });
       }
     }
   } catch (error) {
@@ -397,5 +414,5 @@ export async function main() {
   } finally {
     await closeBrowser();
   }
-  console.log(`\n  ${pc.dim('Bye.')}\n`);
+  console.log(`\n  ${gold('♦')} ${pale('Vale.')} ${bronze('Farewell.')}\n`);
 }

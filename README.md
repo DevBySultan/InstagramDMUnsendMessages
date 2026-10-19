@@ -3,24 +3,22 @@
 A command-line tool that unsends **your own** messages in an Instagram DM conversation, for both sides. It drives the normal instagram.com website in a browser window on your computer, with menus you control from the terminal.
 
 ```
-  ┌─────────────────────────────────────────────────────┐
-  │ IG Unsend  v1.0.0                                   │
-  │ Unsend your own Instagram messages, for both sides. │
-  └─────────────────────────────────────────────────────┘
+  ╔══════════════════════════════════════════════════════════════════════════╗
+  ║   ██╗ ██████╗     ██╗   ██╗███╗   ██╗███████╗███████╗███╗   ██╗██████╗   ║
+  ║   ██║██╔════╝     ██║   ██║████╗  ██║██╔════╝██╔════╝████╗  ██║██╔══██╗  ║
+  ║   ██║██║  ███╗    ██║   ██║██╔██╗ ██║███████╗█████╗  ██╔██╗ ██║██║  ██║  ║
+  ║   ██║██║   ██║    ██║   ██║██║╚██╗██║╚════██║██╔══╝  ██║╚██╗██║██║  ██║  ║
+  ║   ██║╚██████╔╝    ╚██████╔╝██║ ╚████║███████║███████╗██║ ╚████║██████╔╝  ║
+  ║   ╚═╝ ╚═════╝      ╚═════╝ ╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝  ╚═══╝╚═════╝   ║
+  ║                     ♦  Quod scripsi, delevi  ♦                           ║
+  ╚══════════════════════════════════════════════════════════════════════════╝
 
-  Speed Safe   Limit None   Saved login Yes
-
-? What do you want to do?
-> Test run
-  Unsend my messages
- ──────────────
-  Settings
-  Diagnose
-  Log out
-  Help
- ──────────────
-  Exit
+♦ What do you want to do?
+► 1. Test run
+  2. Unsend my messages
 ```
+
+Gold on dark in terminals with 24-bit color (Windows Terminal, modern cmd), plain yellow elsewhere. Choose with the arrow keys or the item's number, then Enter.
 
 - Runs only on your computer. You log in to Instagram yourself, in the browser window. Your password is never typed into the tool or saved by it.
 - Touches only the conversation you choose, and only messages whose menu offers **Unsend**.
@@ -69,6 +67,7 @@ Settings and the recent conversations are saved in `settings.json` in the tool's
 ## Limits and risks
 
 - **Instagram's rate limits are not published.** The tool stops as soon as Instagram shows "Try again later". Wait a day, then use the Safe speed.
+- **Messages that vanish and come right back** mean Instagram's server refused the unsend: Instagram hides the message at once and restores it when the server says no. The tool checks every message after unsending, does not count restored ones, retries after a pause, and stops after 3 in a row. This is usually a temporary limit on your account, or a conversation that does not allow unsending (for example when the other person blocked or restricted you). To tell which: unsend one message by hand in the Instagram app. If it also comes back, it is Instagram, not the tool.
 - **Automating Instagram is against its Terms of Use.** The tool clicks like a person and is slow on purpose, but the risk to your account is not zero.
 - **It depends on how instagram.com is built.** Keep Instagram in English. If the tool cannot find your messages, choose **Diagnose**: it saves a report to `debug/` with the page structure and button names (no message text) that shows what to fix.
 - Unsending does not undo what the other person already saw, saved, screenshotted or downloaded.
