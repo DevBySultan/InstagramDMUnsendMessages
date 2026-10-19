@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Mock DM thread</title>
+<style>
+  body { margin: 0; display: flex; height: 100vh; font: 14px sans-serif; }
+  nav { width: 200px; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px; }
+  #scroller { flex: 1; overflow-y: auto; display: flex; flex-direction: column-reverse; }
+  [role="row"] { position: relative; display: flex; padding: 6px 60px; }
+  [role="row"].mine { justify-content: flex-end; }
+  .bubble { padding: 6px 10px; border-radius: 12px; background: #eee; }
+  .toolbar { display: none; }
+  [role="row"]:hover .toolbar { display: inline-flex; }
+  .floating { position: fixed; }
+  [role="menu"], [role="dialog"] { position: fixed; top: 40%; left: 45%; background: #fff; border: 1px solid #999; padding: 8px; }
+</style>
+</head>
+<body>
+<nav><div role="button" aria-label="More">More</div></nav>
+<div id="scroller"><div role="grid" aria-label="Messages" id="grid"><div id="sentinel" style="height:1px"></div></div></div>
+<script>
+  // Options: ?portal=1 renders the hover toolbar outside the row,
+  // ?blockAfter=N shows a "Try Again Later" dialog after N unsends.
+  const params = new URLSearchParams(location.search);
+  const portal = params.has('portal');
+  const blockAfter = Number(params.get('blockAfter') || Infinity);
+  const TOTAL = 90, PAGE = 30;
+  const grid = document.getElementById('grid');
+  let loaded = 0, unsent = 0, floating = null;
+  window.state = { unsent: () => unsent };
+
+  function isMine(i) { return i % 3 !== 0; }
+
+  function closeMenus() { document.querySelectorAll('[role="menu"], [role="dialog"]').forEach((m) => m.remove()); }
+
+  function openMenu(row) {
+    closeMenus();
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    const items = ['Forward', 'Copy'].concat(row.classList.contains('mine') ? ['Unsend'] : ['Report']);
+    for (const name of items) {
+      const item = document.createElement('div');
+      item.setAttribute('role', 'menuitem');
+      item.textContent = name;
+      if (name === 'Unsend') item.onclick = () => confirmUnsend(row);
+      menu.append(item);
+    }
+    document.body.append(menu);
+  }
+
+  function confirmUnsend(row) {
+    closeMenus();
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.innerHTML = '<p>Unsend message?</p><button>Unsend</button><button>Cancel</button>';
+    const [ok, cancel] = dialog.querySelectorAll('button');
+    ok.onclick = () => {
+      dialog.remove();
+      if (unsent >= blockAfter) {
+        const blocked = document.createElement('div');
+        blocked.setAttribute('role', 'dialog');
+        blocked.textContent = 'Try Again Later';
+        document.body.append(blocked);
+        return;
+      }
+      unsent++;
+      setTimeout(() => row.remove(), 200);
+    };
+    cancel.onclick = () => dialog.remove();
+    document.body.append(dialog);
+  }
+
+  function moreButton(row) {
+    const button = document.createElement('div');
+    button.setAttribute('role', 'button');
+    button.innerHTML = '<svg aria-label="More" width="16" height="16"><circle cx="8" cy="8" r="6"/></svg>';
+    button.onclick = (event) => { event.stopPropagation(); openMenu(row); };
+    return button;
+  }
+
+  function makeRow(i) {
+    const row = document.createElement('div');
+    row.setAttribute('role', 'row');
+    row.dataset.index = i;
+    if (isMine(i)) row.classList.add('mine');
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = (isMine(i) ? 'me ' : 'them ') + i;
+    if (portal) {
+      row.onmouseenter = () => {
+        floating?.remove();
+        floating = moreButton(row);
+        floating.className = 'floating';
+        const box = row.getBoundingClientRect();
+        floating.style.top = box.top + 4 + 'px';
+        floating.style.left = (isMine(i) ? box.right - 50 : box.left + 220) + 'px';
+        document.body.append(floating);
+      };
+      row.append(bubble);
+    } else {
+      const toolbar = document.createElement('span');
+      toolbar.className = 'toolbar';
+      toolbar.append(moreButton(row));
+      if (isMine(i)) row.append(toolbar, bubble); else row.append(bubble, toolbar);
+    }
+    return row;
+  }
+
+  // Newest messages have the highest index; older pages are prepended.
+  function loadPage() {
+    const end = TOTAL - loaded, start = Math.max(0, end - PAGE);
+    const frag = document.createDocumentFragment();
+    for (let i = start; i < end; i++) frag.append(makeRow(i));
+    document.getElementById('sentinel').after(frag);
+    loaded += end - start;
+  }
+
+  // Like Instagram, older messages load when the top of the list comes into view.
+  loadPage();
+  new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting && loaded < TOTAL) setTimeout(loadPage, 300);
+  }, { root: document.getElementById('scroller') }).observe(document.getElementById('sentinel'));
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeMenus(); });
+</script>
+</body>
+</html>
