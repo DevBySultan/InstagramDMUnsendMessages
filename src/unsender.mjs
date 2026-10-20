@@ -126,10 +126,38 @@ async function isBlocked(page) {
     || (await page.getByRole('alert').filter({ hasText: LABELS.blocked }).filter({ visible: true }).count()) > 0;
 }
 
-// How many of your messages on screen have this fingerprint.
-const countMatching = (page, fp) => page.evaluate((value) => {
-  return [...document.querySelectorAll('[data-unsend-mine="1"]')].filter((r) => r.getAttribute('data-unsend-fp') === value).length;
-}, fp);
+// Where a message sits, to recognize it if Instagram puts it back: the
+// nearest row above it that is not yours (we never remove those) and has
+// content, like the other person's message or a date line. A message that
+// comes back returns below that row, while older messages load above it, so
+// a repeated text like "ok" from older history is not counted. Rows without
+// content (the loading spinner at the top) do not count: older messages load
+// below those. Returns the anchor's id, or 'top' when no such row is loaded.
+const anchorOf = (handle) => handle.evaluate((el) => {
+  const usable = (row) => row.getAttribute('data-unsend-mine') === '0' && row.getAttribute('data-unsend-fp') !== '|';
+  let ref = el.previousElementSibling;
+  while (ref && !usable(ref)) ref = ref.previousElementSibling;
+  if (!ref) return 'top';
+  if (!ref.hasAttribute('data-unsend-anchor')) ref.setAttribute('data-unsend-anchor', Math.random().toString(36).slice(2));
+  return ref.getAttribute('data-unsend-anchor');
+});
+
+// For each [anchor, fingerprint], how many of your messages with that
+// fingerprint are below the anchor; null when the anchor is gone.
+const countBelow = (page, groups) => page.evaluate((pairs) => pairs.map(([anchor, fp]) => {
+  let row;
+  if (anchor === 'top') row = document.querySelector('[data-unsend-row]');
+  else {
+    const ref = document.querySelector(`[data-unsend-anchor="${anchor}"]`);
+    if (!ref) return null;
+    row = ref.nextElementSibling;
+  }
+  let count = 0;
+  for (; row; row = row.nextElementSibling) {
+    if (row.getAttribute('data-unsend-mine') === '1' && row.getAttribute('data-unsend-fp') === fp) count++;
+  }
+  return count;
+}), groups);
 
 // Returns 'skipped' (no Unsend in the menu), 'found' (dry run), 'unsent',
 // 'unconfirmed' (the message stayed on screen), or 'reverted' (it went away
@@ -161,8 +189,8 @@ async function processRow(page, handle, { dryRun, settleMs, notices }) {
       return unsendItem ? 'found' : 'skipped';
     }
 
-    const fp = await handle.getAttribute('data-unsend-fp');
-    const before = await countMatching(page, fp);
+    const group = [await anchorOf(handle), await handle.getAttribute('data-unsend-fp')];
+    const [before] = await countBelow(page, [group]);
     const shape = await handle.evaluate((el) => [el.textContent, el.querySelectorAll('img, video, audio').length]);
     await unsendItem.click();
     const confirm = await firstVisible(page.getByRole('dialog').getByRole('button', { name: LABELS.unsend }), 3000);
@@ -186,7 +214,8 @@ async function processRow(page, handle, { dryRun, settleMs, notices }) {
       await sleep(250);
     }
     await page.evaluate(tagRows);
-    return (await countMatching(page, fp)) >= before ? 'reverted' : 'unsent';
+    const [after] = await countBelow(page, [group]);
+    return after !== null && after >= before ? 'reverted' : 'unsent';
   } finally {
     await handle.evaluate((el, [current, seen]) => {
       el.removeAttribute(current);
@@ -196,15 +225,23 @@ async function processRow(page, handle, { dryRun, settleMs, notices }) {
 }
 
 // Scrolls to the oldest loaded message so Instagram loads older ones.
-// Returns true when new messages showed up.
-async function loadOlder(page, attempts = 4) {
+// Returns true when new messages showed up. Without needGrowth, any of your
+// messages not yet processed also counts.
+async function loadOlder(page, { attempts = 4, needGrowth = false } = {}) {
   for (let i = 0; i < attempts; i++) {
     const before = await page.evaluate(tagRows);
-    await page.evaluate(() => {
+    // Instagram loads older messages when the top comes into view, so if the
+    // list is already at the top, move away a little first.
+    await page.evaluate(async () => {
       const scroller = document.querySelector('[data-unsend-scroller]');
       if (!scroller) return;
       const reversed = getComputedStyle(scroller).flexDirection === 'column-reverse';
-      scroller.scrollTop = reversed ? -(scroller.scrollHeight - scroller.clientHeight) : 0;
+      const top = reversed ? -(scroller.scrollHeight - scroller.clientHeight) : 0;
+      if (Math.abs(scroller.scrollTop - top) < 50) {
+        scroller.scrollTop = top + 600;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      scroller.scrollTop = top;
     });
     const box = await page.locator('[data-unsend-scroller]').boundingBox();
     if (box) {
@@ -213,7 +250,7 @@ async function loadOlder(page, attempts = 4) {
     }
     await sleep(1500 + i * 1500);
     const after = await page.evaluate(tagRows);
-    if (after > before || (await page.locator(`${ROW}${MINE}:not([${SEEN}])`).count()) > 0) return true;
+    if (after > before || (!needGrowth && (await page.locator(`${ROW}${MINE}:not([${SEEN}])`).count()) > 0)) return true;
   }
   return false;
 }
@@ -230,9 +267,11 @@ export async function waitForMessages(page, timeout = 30000) {
 
 // Why a run ended: 'end' (start of the conversation reached), 'limit',
 // 'stopped' (shouldStop returned true), 'blocked' (Instagram's "try again
-// later"), 'unconfirmed' (5 unsends in a row left the message on screen), or
-// 'reverted' (Instagram put 3 messages in a row back after unsending them).
-// onEvent receives { type: 'unsent' | 'found' | 'loading' | 'pause' | 'working' | 'reverted', ... }.
+// later"), 'unconfirmed' (5 unsends in a row left the message on screen),
+// 'refused' (Instagram put back the first message of the run: the
+// conversation or the account does not take unsends from the web right now),
+// or 'limited' (messages came back after others worked: a rate limit).
+// onEvent receives { type: 'unsent' | 'found' | 'loading' | 'pause' | 'working' | 'reverted' | 'checking', ... }.
 export async function unsendThread(page, options = {}) {
   const {
     dryRun = false,
@@ -242,6 +281,8 @@ export async function unsendThread(page, options = {}) {
     breakEvery = 40,
     breakSeconds = 90,
     settleMs = 1500,
+    // How long to wait at the end before the last check for put-back messages.
+    finalCheckMs = 5000,
     revertBackoff = 20000,
     shouldStop = () => false,
     onEvent = () => {},
@@ -250,9 +291,39 @@ export async function unsendThread(page, options = {}) {
   const stats = { unsent: 0, found: 0, skipped: 0, unconfirmed: 0, reverted: 0, notices: [], stoppedBy: 'end' };
   let failuresInARow = 0;
   let revertsInARow = 0;
+  // Breaks come at an uneven count and last an uneven time, like a person's.
+  const nextBreakAfter = () => (breakEvery > 0 ? Math.round(jitter(breakEvery * 0.75, breakEvery * 1.25)) : Infinity);
+  let untilBreak = nextBreakAfter();
   // Fingerprint -> times Instagram put that message back. A put-back message
   // is a new element, so without this it would be picked again forever.
   const revertedTimes = new Map();
+  // "anchor|fingerprint" -> { group, expected }: how many such messages were
+  // below the anchor after unsending one, to catch a message Instagram puts
+  // back later than settleMs.
+  const unsentGroups = new Map();
+  // Moves messages that came back late from unsent to reverted. Returns how many.
+  const verifyUnsent = async () => {
+    if (dryRun || unsentGroups.size === 0) return 0;
+    await page.evaluate(tagRows);
+    const entries = [...unsentGroups.entries()];
+    const counts = await countBelow(page, entries.map(([, { group }]) => group));
+    let back = 0;
+    entries.forEach(([key, { group, expected }], i) => {
+      if (counts[i] === null || counts[i] <= expected) return;
+      back += counts[i] - expected;
+      unsentGroups.set(key, { group, expected: counts[i] });
+      revertedTimes.set(group[1], (revertedTimes.get(group[1]) ?? 0) + 1);
+    });
+    stats.unsent -= back;
+    stats.reverted += back;
+    return back;
+  };
+  // Once the start of the conversation is loaded, nothing older can appear.
+  let reachedStart = false;
+  const stopForLateRevert = () => {
+    stats.stoppedBy = stats.unsent === 0 ? 'refused' : 'limited';
+    onEvent({ type: 'reverted', inARow: 1, count: stats.unsent });
+  };
 
   if (!(await waitForMessages(page))) throw new Error('Could not find the conversation messages on the page.');
 
@@ -269,12 +340,33 @@ export async function unsendThread(page, options = {}) {
     const next = page.locator(`${ROW}${MINE}:not([${SEEN}])`).last();
     if ((await next.count()) === 0) {
       onEvent({ type: 'loading' });
+      const rowsBefore = await page.evaluate(tagRows);
       if (!(await loadOlder(page))) break;
+      // Older messages after all: positions counted from the top no longer hold.
+      if ((await page.evaluate(tagRows)) > rowsBefore && reachedStart) {
+        reachedStart = false;
+        for (const [key, { group }] of unsentGroups) if (group[0] === 'top') unsentGroups.delete(key);
+      }
       continue;
     }
 
     const handle = await next.elementHandle();
     const fp = await handle.getAttribute('data-unsend-fp');
+    let anchor = await anchorOf(handle);
+    // With no message from the other person above it, older messages loading
+    // later could be mistaken for put-back ones. Load until there is one, or
+    // until the start of the conversation.
+    if (anchor === 'top' && !reachedStart && !dryRun) {
+      onEvent({ type: 'loading' });
+      if (await loadOlder(page, { needGrowth: true })) continue;
+      reachedStart = true;
+      anchor = await anchorOf(handle);
+    }
+    // A row we already unsent showing up again below its anchor came back late.
+    if (unsentGroups.has(`${anchor}|${fp}`) && (await verifyUnsent()) > 0) {
+      stopForLateRevert();
+      break;
+    }
     if ((revertedTimes.get(fp) ?? 0) >= 2) {
       await handle.evaluate((el, seen) => el.setAttribute(seen, '1'), SEEN);
       continue;
@@ -299,8 +391,13 @@ export async function unsendThread(page, options = {}) {
       revertedTimes.set(fp, (revertedTimes.get(fp) ?? 0) + 1);
       for (const text of notices) if (!stats.notices.includes(text)) stats.notices.push(text);
       onEvent({ type: 'reverted', inARow: ++revertsInARow });
-      if (revertsInARow >= 3) {
-        stats.stoppedBy = 'reverted';
+      // Retrying would only add attempts Instagram counts against the account.
+      if (stats.unsent === 0) {
+        stats.stoppedBy = 'refused';
+        break;
+      }
+      if (revertsInARow >= 2) {
+        stats.stoppedBy = 'limited';
         break;
       }
       const seconds = (revertBackoff / 1000) * revertsInARow;
@@ -309,20 +406,35 @@ export async function unsendThread(page, options = {}) {
     } else if (result === 'unsent') {
       failuresInARow = 0;
       revertsInARow = 0;
+      const group = [anchor, fp];
+      const [expected] = await countBelow(page, [group]);
+      if (expected !== null) unsentGroups.set(`${anchor}|${fp}`, { group, expected });
     }
 
     if (result === 'unsent' || result === 'found') {
       const done = stats.unsent + stats.found;
       onEvent({ type: result, count: done });
-      if (!dryRun && breakEvery > 0 && done % breakEvery === 0) {
-        onEvent({ type: 'pause', seconds: breakSeconds });
-        await wait(breakSeconds * 1000, shouldStop);
+      if (!dryRun && --untilBreak <= 0) {
+        const seconds = Math.round(breakSeconds * jitter(0.8, 1.3));
+        onEvent({ type: 'pause', seconds });
+        await wait(seconds * 1000, shouldStop);
+        untilBreak = nextBreakAfter();
+        if ((await verifyUnsent()) > 0) {
+          stopForLateRevert();
+          break;
+        }
       } else {
         await wait(jitter(minDelay, maxDelay), shouldStop);
       }
     }
   }
 
+  // A last look, so the record never counts a message Instagram put back.
+  if (!dryRun && unsentGroups.size > 0) {
+    onEvent({ type: 'checking' });
+    await sleep(finalCheckMs);
+    if ((await verifyUnsent()) > 0 && ['end', 'limit', 'stopped'].includes(stats.stoppedBy)) stopForLateRevert();
+  }
   return stats;
 }
 

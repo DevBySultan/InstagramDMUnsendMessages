@@ -36,11 +36,14 @@
   const portal = params.has('portal');
   const blockAfter = Number(params.get('blockAfter') || Infinity);
   const revertAfter = Number(params.get('revertAfter') ?? Infinity);
+  // ?revertDelay=MS: how long after hiding a message it is put back (default 300).
+  const revertDelay = Number(params.get('revertDelay') ?? 300);
   const TOTAL = 90, PAGE = 30;
   let loaded = 0, unsent = 0, floating = null;
   window.state = { unsent: () => unsent };
 
-  function isMine(i) { return i % 3 !== 0; }
+  // ?allMine=1 makes every message yours, so none of the other person's is above them.
+  function isMine(i) { return params.has('allMine') || i % 3 !== 0; }
 
   function closeMenus() { document.querySelectorAll('[role="menu"], [role="dialog"]').forEach((m) => m.remove()); }
 
@@ -85,7 +88,7 @@
           toast.textContent = "Couldn't unsend message";
           document.body.append(toast);
           setTimeout(() => toast.remove(), 600);
-        }, 300);
+        }, revertDelay);
       }, 200);
     };
     cancel.onclick = () => dialog.remove();
@@ -111,7 +114,8 @@
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.setAttribute('role', 'none');
-    bubble.textContent = (mine ? 'me ' : 'them ') + i;
+    // ?dupes=1 gives every message the same text, like a chat full of "ok".
+    bubble.textContent = params.has('dupes') ? (mine ? 'ok' : 'hey') : (mine ? 'me ' : 'them ') + i;
     if (portal) {
       row.onmouseenter = () => {
         floating?.remove();

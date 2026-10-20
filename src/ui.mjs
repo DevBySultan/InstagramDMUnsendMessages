@@ -78,7 +78,7 @@ export function banner(version, ribbon) {
 
 // "Speed ♦ Safe   ·   Limit ♦ None"
 export const ribbon = (pairs) =>
-  pairs.map(([label, value]) => `${bronze(label)} ${gold('♦')} ${ivory(value)}`).join(bronze('    ·    '));
+  pairs.map(([label, value]) => `${bronze(label)} ${gold('♦')} ${ivory(value)}`).join(bronze('   ·   '));
 
 export function title(text) {
   const spaced = text.toUpperCase().split('').join(' ');

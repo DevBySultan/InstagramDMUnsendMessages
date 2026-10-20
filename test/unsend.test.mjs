@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import { unsendThread, waitForMessages } from '../src/unsender.mjs';
 
 const MOCK = pathToFileURL(new URL('./mock-thread.html', import.meta.url).pathname).href;
-const FAST = { minDelay: 0, maxDelay: 0, breakEvery: 0, settleMs: 700, revertBackoff: 0 };
+const FAST = { minDelay: 0, maxDelay: 0, breakEvery: 0, settleMs: 700, finalCheckMs: 1000, revertBackoff: 0 };
 let browser;
 
 before(async () => {
@@ -72,22 +72,60 @@ test('stops safely when asked to', async () => {
   await page.close();
 });
 
-test('does not count or loop on messages Instagram puts back', async () => {
+test('stops at the first message when the conversation refuses unsends', async () => {
   const page = await open('?revertAfter=0');
-  const stats = await unsendThread(page, FAST);
+  const stats = await unsendThread(page, { ...FAST, settleMs: 1500 });
   assert.equal(stats.unsent, 0);
-  assert.equal(stats.reverted, 3);
-  assert.equal(stats.stoppedBy, 'reverted');
+  assert.equal(stats.reverted, 1);
+  assert.equal(stats.stoppedBy, 'refused');
   assert.deepEqual(stats.notices, ["Couldn't unsend message"]);
   assert.equal((await remaining(page)).filter(Boolean).length, 20);
   await page.close();
 });
 
-test('stops when Instagram starts putting messages back mid-run', async () => {
+test('treats messages put back after others worked as a rate limit', async () => {
   const page = await open('?revertAfter=4');
-  const stats = await unsendThread(page, FAST);
+  const stats = await unsendThread(page, { ...FAST, settleMs: 1500 });
   assert.equal(stats.unsent, 4);
-  assert.equal(stats.stoppedBy, 'reverted');
+  assert.equal(stats.reverted, 2);
+  assert.equal(stats.stoppedBy, 'limited');
+  await page.close();
+});
+
+test('corrects the count when Instagram puts a message back late', async () => {
+  // Put back 2.5 s after hiding, long after the 0.7 s the bot waits.
+  const page = await open('?revertAfter=2&revertDelay=2500');
+  const stats = await unsendThread(page, { ...FAST, finalCheckMs: 3500 });
+  assert.equal(await page.evaluate(() => window.state.unsent()), 2);
+  assert.equal(stats.unsent, 2);
+  assert.ok(stats.reverted >= 1);
+  assert.equal(stats.stoppedBy, 'limited');
+  await page.close();
+});
+
+test('repeated texts loading from older messages are not mistaken for put-back ones', async () => {
+  const page = await open('?dupes=1');
+  const stats = await unsendThread(page, FAST);
+  assert.equal(stats.reverted, 0);
+  assert.equal(stats.unsent, 60);
+  assert.equal(stats.stoppedBy, 'end');
+  await page.close();
+});
+
+test('a chat of only your own identical messages is unsent without false put-backs', async () => {
+  const page = await open('?dupes=1&allMine=1');
+  const stats = await unsendThread(page, FAST);
+  assert.equal(stats.reverted, 0);
+  assert.equal(stats.unsent, 90);
+  assert.equal(stats.stoppedBy, 'end');
+  await page.close();
+});
+
+test('detects put-back messages in a chat of repeated texts', async () => {
+  const page = await open('?dupes=1&revertAfter=3');
+  const stats = await unsendThread(page, { ...FAST, settleMs: 1500 });
+  assert.equal(stats.unsent, 3);
+  assert.equal(stats.stoppedBy, 'limited');
   await page.close();
 });
 

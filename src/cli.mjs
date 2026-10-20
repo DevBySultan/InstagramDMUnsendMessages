@@ -152,11 +152,60 @@ async function chooseConversation() {
 const REASONS = {
   end: ['ok', 'Reached the start of the conversation.'],
   limit: ['ok', 'Reached the limit for this run.'],
+  daily: ['ok', "Reached today's cap. Continue tomorrow, or raise the cap in Settings."],
   stopped: ['warn', 'You stopped it. Run it again to continue where it left off.'],
-  reverted: ['fail', 'Instagram put your messages back right after unsending them: its server refused the unsend.'],
+  refused: ['fail', 'Instagram put the first message back: it does not take unsends here right now. Nothing was unsent.'],
+  limited: ['fail', 'Instagram started putting messages back after others worked: a rate limit. Wait 24 hours, then continue on Safe speed.'],
   blocked: ['fail', 'Instagram said "Try again later". Wait a few hours (a day is safer), then use the Safe speed.'],
   unconfirmed: ['fail', 'Messages stopped disappearing after Unsend. Run Diagnose and send the report.'],
 };
+
+const HOUR = 3600000;
+const hoursSince = (iso) => (iso ? (Date.now() - Date.parse(iso)) / HOUR : Infinity);
+const ago = (iso) => {
+  const hours = hoursSince(iso);
+  return hours < 1 ? `${Math.max(1, Math.round(hours * 60))} min ago` : `${Math.round(hours)} h ago`;
+};
+
+// What makes a first run go through. Returns how many messages this run may
+// unsend, or 0 when it should not start.
+async function preflight(current, target) {
+  const lang = (await pageLanguage(current)).toLowerCase();
+  const tested = settings.recent.find((r) => r.url === target.url)?.tested;
+  const left = settings.dailyLimit ? Math.max(0, settings.dailyLimit - settings.unsentToday) : Infinity;
+  const checks = [
+    !lang || lang.startsWith('en')
+      ? ['ok', 'Instagram is in English']
+      : ['warn', `Instagram is in "${lang}": switch it to English (language selector at the bottom of instagram.com)`],
+    settings.speed === 'safe'
+      ? ['ok', 'Speed is Safe']
+      : ['warn', `Speed is ${settings.speedProfile.name}: Safe is less likely to get limited`],
+    hoursSince(settings.lastLimitedAt) >= 24
+      ? ['ok', 'Instagram has not refused or limited unsends in the last 24 hours']
+      : ['fail', `Instagram refused or limited unsends ${ago(settings.lastLimitedAt)}: trying again within 24 hours can extend it`],
+    hoursSince(settings.lastRunAt) >= 1
+      ? ['ok', 'At least an hour since the last run']
+      : ['warn', `The last run was ${ago(settings.lastRunAt)}: leave an hour between runs`],
+    tested ? ['ok', 'Test run done on this conversation'] : ['warn', 'No test run on this conversation yet'],
+    ...(Number.isFinite(left)
+      ? [left > 0 ? ['ok', `${left} of today's ${settings.dailyLimit} left`] : ['fail', `Today's cap of ${settings.dailyLimit} is used up`]]
+      : []),
+  ];
+  ui.blank();
+  console.log(`  ${bold(pale('Before you start'))}`);
+  for (const [kind, text] of checks) ui[kind](text);
+  ui.blank();
+
+  if (left === 0) {
+    ui.info("Come back tomorrow, or raise the daily cap in Settings.");
+    return 0;
+  }
+  if (hoursSince(settings.lastLimitedAt) < 24) {
+    const go = await confirm({ message: 'Start anyway?', default: false });
+    if (!go) return 0;
+  }
+  return Math.min(settings.limit || Infinity, left);
+}
 
 async function runUnsend({ dryRun }) {
   ui.title(dryRun ? 'Test run (nothing is deleted)' : 'Unsend my messages');
@@ -166,11 +215,15 @@ async function runUnsend({ dryRun }) {
   if (!current) return;
 
   const speed = settings.speedProfile;
-  let limit = settings.limit || Infinity;
+  let limit;
   if (dryRun) {
     limit = await number({ message: 'How many of your messages to check?', default: 5, min: 1, required: true });
   } else {
-    ui.blank();
+    limit = await preflight(current, target);
+    if (!limit) {
+      ui.info('Nothing was changed.');
+      return;
+    }
     ui.table([
       ['Conversation', gold(label(target))],
       ['Speed', `${speed.name} ${bronze(`(${speed.summary})`)}`],
@@ -214,7 +267,10 @@ async function runUnsend({ dryRun }) {
   const onEvent = (event) => {
     if (event.type === 'unsent' || event.type === 'found') count = event.count;
     if (event.type === 'loading') state = () => ivory('Loading older messages');
-    else if (event.type === 'reverted') state = () => amber('Instagram put a message back');
+    else if (event.type === 'reverted') {
+      if (event.count !== undefined) count = event.count;
+      state = () => amber('Instagram put a message back');
+    } else if (event.type === 'checking') state = () => ivory('Checking nothing came back');
     else if (event.type === 'pause') {
       const until = Date.now() + event.seconds * 1000;
       const why = event.reason === 'reverted' ? 'Instagram put a message back, waiting' : 'Short break to avoid a block';
@@ -238,6 +294,10 @@ async function runUnsend({ dryRun }) {
   }
 
   ui.blank();
+  // A run that stopped at the daily cap rather than the per-run limit.
+  if (stats.stoppedBy === 'limit' && !dryRun && settings.dailyLimit && limit < (settings.limit || Infinity)) {
+    stats.stoppedBy = 'daily';
+  }
   const [kind, reason] = REASONS[stats.stoppedBy] ?? ['info', stats.stoppedBy];
   const tint = { ok: sage, warn: amber, fail: ui.wine }[kind] ?? ivory;
   ui.ledger(dryRun ? 'Test run' : 'The record', [
@@ -250,21 +310,23 @@ async function runUnsend({ dryRun }) {
   ]);
   ui.blank();
   ui[kind](reason);
-  if (stats.stoppedBy === 'reverted') {
-    for (const text of stats.notices) ui.note(`Instagram said: "${text}"`);
+  for (const text of stats.notices) ui.note(`Instagram said: "${text}"`);
+  if (stats.stoppedBy === 'refused') {
     ui.blank();
-    ui.note('To find out why, before going back to the menu:');
-    ui.note('  1. In the browser window (still open), unsend one message by hand.');
-    ui.note('  2. Then try the same in the Instagram app on your phone.');
-    ui.note('Both come back: Instagram refuses it (account limit, or the other person blocked');
-    ui.note('  or restricted you). Wait 24 hours and try again on Safe speed.');
-    ui.note('Only the browser fails: choose Log out, then log in again and retry.');
+    ui.note('Unsend one message of this conversation in the Instagram app on your phone:');
+    ui.note('  It works there: this conversation cannot be unsent from the web. Use the phone for it.');
+    ui.note('  It comes back there too: your account is limited. Wait 24 hours before trying again.');
+    ui.note('Either way, do not try other conversations now: every attempt counts against the account.');
   } else if (stats.unsent + stats.found === 0 && stats.stoppedBy !== 'stopped') {
     ui.warn('Nothing was found. Run Diagnose from the menu and send the report.');
   } else if (dryRun) {
     ui.info('It works. Choose "Unsend my messages" from the menu to do it for real.');
   }
-  await settings.remember(target.url, { name: target.name, unsent: stats.unsent });
+  if (!dryRun) {
+    settings.lastRunAt = new Date().toISOString();
+    if (['refused', 'limited', 'blocked'].includes(stats.stoppedBy)) settings.lastLimitedAt = settings.lastRunAt;
+  }
+  await settings.remember(target.url, { name: target.name, unsent: stats.unsent, tested: dryRun && stats.found > 0 });
 }
 
 async function diagnose() {
@@ -302,6 +364,12 @@ async function settingsMenu() {
           value: 'limit',
           description: 'Stop after this many messages, to spread a big conversation over several days',
         },
+        {
+          name: `Daily cap           ${gold(settings.dailyLimit ? String(settings.dailyLimit) : 'No cap')}`,
+          short: 'Daily cap',
+          value: 'daily',
+          description: `Most messages to unsend in one day, across all runs (${settings.unsentToday} today)`,
+        },
         { name: 'Back', value: 'back' },
       ],
     });
@@ -315,6 +383,14 @@ async function settingsMenu() {
           value,
           description: s.summary,
         })),
+      });
+    } else if (choice === 'daily') {
+      settings.dailyLimit = await number({
+        message: 'Most messages to unsend in a day (0 = no cap):',
+        default: settings.dailyLimit,
+        min: 0,
+        step: 1,
+        required: true,
       });
     } else {
       settings.limit = await number({
@@ -357,7 +433,8 @@ function help() {
     'Only your own messages can be unsent. The other person\'s messages stay.',
     'Unsending is permanent. It does not undo screenshots or downloads the other person made.',
     'Instagram limits how fast you can act. If it says "Try again later", wait a day and use the Safe speed.',
-    'If messages vanish and come right back, Instagram refused the unsend. The tool stops; wait a day.',
+    'If a message vanishes and comes right back, Instagram refused the unsend. The tool stops at once.',
+    'Do one conversation per sitting. Testing several in a row is what gets an account limited.',
     'Automating Instagram is against its Terms of Use. The tool is slow on purpose, but the risk is not zero.',
     'Keep Instagram in English for the best results.',
   ].forEach((line) => console.log(`  ${gold('♦')} ${ivory(line)}`));
@@ -372,6 +449,7 @@ export async function main() {
       ui.banner(VERSION, ui.ribbon([
         ['Speed', settings.speedProfile.name],
         ['Limit', settings.limit ? String(settings.limit) : 'None'],
+        ['Today', settings.dailyLimit ? `${settings.unsentToday}/${settings.dailyLimit}` : String(settings.unsentToday)],
         ['Saved login', existsSync(PROFILE) ? 'Yes' : 'No'],
       ]));
       const action = await select({
