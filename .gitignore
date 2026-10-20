@@ -2,3 +2,4 @@ node_modules/
 .browser-profile/
 debug/
 settings.json
+history.json

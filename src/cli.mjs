@@ -11,6 +11,7 @@ import {
 } from './unsender.mjs';
 import { launchBrowser } from './browser.mjs';
 import { Settings, SPEEDS } from './settings.mjs';
+import { History } from './history.mjs';
 import * as ui from './ui.mjs';
 
 const { gold, pale, bronze, ivory, sage, amber, bold } = ui;
@@ -29,6 +30,7 @@ const VERSION = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')
 const CONVERSATION_URL = /^https:\/\/(www\.)?instagram\.com\/direct\/t\/(\d+)\/?(\?.*)?$/;
 
 const settings = new Settings(ROOT);
+const history = new History(ROOT);
 let browser = null;
 let page = null;
 
@@ -345,6 +347,17 @@ async function runUnsend({ dryRun }) {
     settings.lastRunAt = new Date().toISOString();
     if (['refused', 'limited', 'blocked'].includes(stats.stoppedBy)) settings.lastLimitedAt = settings.lastRunAt;
   }
+  await history.add({
+    name: label(target),
+    url: target.url,
+    test: dryRun,
+    unsent: stats.unsent,
+    found: stats.found,
+    reverted: stats.reverted,
+    durationMs: Date.now() - started,
+    outcome: stats.stoppedBy,
+  });
+  if (settings.bell && !dryRun) process.stdout.write('\x07');
   await settings.remember(target.url, {
     name: target.name,
     unsent: stats.unsent,
@@ -394,11 +407,19 @@ async function settingsMenu() {
           value: 'daily',
           description: `Most messages to unsend in one day, across all runs (${settings.unsentToday} today)`,
         },
+        {
+          name: `Bell when done      ${gold(settings.bell ? 'On' : 'Off')}`,
+          short: 'Bell when done',
+          value: 'bell',
+          description: 'Ring the terminal bell when a run ends, so you know even with the window minimized',
+        },
         { name: 'Back', value: 'back' },
       ],
     });
     if (choice === 'back') return;
-    if (choice === 'speed') {
+    if (choice === 'bell') {
+      settings.bell = !settings.bell;
+    } else if (choice === 'speed') {
       settings.speed = await select({
         message: 'Speed:',
         default: settings.speed,
@@ -430,6 +451,48 @@ async function settingsMenu() {
   }
 }
 
+async function chronicle() {
+  while (true) {
+    ui.title('The Chronicle');
+    if (history.entries.length === 0) {
+      ui.info('Nothing recorded yet. Every run will be written here.');
+      ui.blank();
+      await input({ message: 'Press Enter to return to the menu' });
+      return;
+    }
+    const t = history.totals;
+    ui.ledger('All time', [
+      ['Messages unsent', bold(gold(String(t.unsent)))],
+      ['Runs', ivory(String(t.runs))],
+      ['Conversations', ivory(String(t.conversations))],
+      ['Time spent', ivory(ui.duration(t.timeMs))],
+      ['Kept since', ivory(t.since ? t.since.slice(0, 10) : '-')],
+    ]);
+    ui.blank();
+    console.log(`  ${bold(pale('Latest runs'))}`);
+    for (const e of history.entries.slice(0, 15)) {
+      const when = new Date(e.at);
+      const date = `${when.toLocaleDateString('en-CA')} ${when.toTimeString().slice(0, 5)}`;
+      const what = e.test ? bronze(`test, ${e.found} found`) : `${gold(String(e.unsent))} ${bronze('unsent')}`;
+      const tag = e.test ? '' : (STATUS_TAGS[e.outcome]?.() ?? '');
+      console.log(`  ${bronze(date)}  ${ivory(e.name)}  ${bronze('·')}  ${what}  ${bronze('·')}  ${ivory(ui.duration(e.durationMs || 0))}${tag ? `  ${bronze('·')}  ${tag}` : ''}`);
+    }
+    if (history.entries.length > 15) ui.note(`...and ${history.entries.length - 15} older runs.`);
+    ui.blank();
+    ui.note('Kept only on this computer, with counts and outcomes, never message text.');
+    ui.blank();
+    const action = await select({
+      message: 'What now?',
+      choices: [{ name: 'Back', value: 'back' }, { name: 'Clear the Chronicle', value: 'clear' }],
+    });
+    if (action === 'back') return;
+    if (await confirm({ message: 'Erase every record in the Chronicle?', default: false })) {
+      await history.clear();
+      ui.ok('The Chronicle is empty.');
+    }
+  }
+}
+
 async function manageSaved() {
   while (true) {
     ui.title('Saved conversations');
@@ -444,6 +507,7 @@ async function manageSaved() {
     const action = await select({
       message: `${settings.recent.length} saved. What do you want to do?`,
       choices: [
+        { name: 'Open one in the browser', value: 'open' },
         { name: 'Rename one', value: 'rename' },
         { name: 'Remove some', value: 'remove' },
         { name: 'Remove all', value: 'removeAll' },
@@ -452,7 +516,15 @@ async function manageSaved() {
     });
     if (action === 'back') return;
 
-    if (action === 'rename') {
+    if (action === 'open') {
+      const entry = await select({
+        message: 'Open which?',
+        pageSize: 12,
+        choices: [...settings.recent.map((e) => ({ name: label(e), value: e, description: describe(e) })), ui.divider(), { name: 'Back', value: null }],
+      });
+      if (!entry) continue;
+      if (await goTo(entry.url)) ui.ok(`Opened "${label(entry)}" in the browser window.`);
+    } else if (action === 'rename') {
       const entry = await select({
         message: 'Rename which?',
         pageSize: 12,
@@ -488,13 +560,13 @@ async function manageSaved() {
 async function logOut() {
   ui.title('Log out');
   const hasLogin = existsSync(PROFILE);
-  const hasData = settings.recent.length > 0 || existsSync(settings.file) || existsSync(DEBUG);
+  const hasData = settings.recent.length > 0 || existsSync(settings.file) || existsSync(history.file) || existsSync(DEBUG);
   if (!hasLogin && !hasData) {
     ui.info('Nothing to remove: no saved login and no saved data on this computer.');
     return;
   }
   ui.warn('This logs you out of Instagram and erases everything the tool kept on this computer:');
-  ui.note('the saved login, the saved conversations, your settings, and any diagnose reports.');
+  ui.note('the saved login, the saved conversations, the Chronicle, your settings, and any diagnose reports.');
   ui.note('Messages you unsent stay unsent. Nothing else changes on your Instagram account.');
   ui.blank();
   if (!(await confirm({ message: 'Log out and erase everything?', default: false }))) {
@@ -505,9 +577,11 @@ async function logOut() {
   await Promise.all([
     rm(PROFILE, { recursive: true, force: true }),
     rm(settings.file, { force: true }),
+    rm(history.file, { force: true }),
     rm(DEBUG, { recursive: true, force: true }),
   ]);
   settings.reset();
+  history.entries = [];
   ui.ok('Logged out, and everything on this computer was erased.');
 }
 
@@ -536,6 +610,12 @@ function help() {
 
 export async function main() {
   await settings.load();
+  await history.load();
+  // Closing the terminal window (SIGHUP, also on Windows) closes the browser too.
+  process.once('SIGHUP', async () => {
+    await closeBrowser();
+    process.exit(129);
+  });
   try {
     while (true) {
       ui.banner(VERSION, ui.ribbon([
@@ -552,6 +632,7 @@ export async function main() {
           { name: 'Unsend my messages', value: 'unsend', description: 'Unsend your messages in a conversation, for both sides.' },
           ui.divider(),
           { name: 'Settings', value: 'settings', description: 'Speed and messages per run.' },
+          { name: 'The Chronicle', value: 'chronicle', description: 'Every run so far: when, which conversation, how many, and how it ended.' },
           { name: 'Saved conversations', value: 'saved', description: 'Rename or remove the conversations saved in this tool. Does not touch Instagram.' },
           { name: 'Diagnose', value: 'diagnose', description: 'Save a report if the tool cannot find your messages.' },
           { name: 'Log out', value: 'logout', description: 'Log out of Instagram and erase everything the tool kept on this computer.' },
@@ -567,6 +648,7 @@ export async function main() {
         else if (action === 'unsend') await runUnsend({ dryRun: false });
         else if (action === 'settings') await settingsMenu();
         else if (action === 'saved') await manageSaved();
+        else if (action === 'chronicle') await chronicle();
         else if (action === 'diagnose') await diagnose();
         else if (action === 'logout') await logOut();
         else help();
@@ -575,7 +657,7 @@ export async function main() {
         ui.blank();
         ui.fail(/has been closed/i.test(error.message) ? 'The browser window was closed.' : error.message.split('\n')[0]);
       }
-      if (action !== 'settings' && action !== 'saved') {
+      if (!['settings', 'saved', 'chronicle'].includes(action)) {
         ui.blank();
         await input({ message: 'Press Enter to return to the menu' });
       }

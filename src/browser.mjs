@@ -76,8 +76,15 @@ export async function launchBrowser(profileDir, { headless = false } = {}) {
   }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   const context = browser.contexts()[0];
+  // If the tool ends without closing it (an error, the terminal killed), take
+  // the browser down with it instead of leaving it running.
+  const killOnExit = () => {
+    if (child.exitCode === null) child.kill();
+  };
+  process.on('exit', killOnExit);
 
   const close = async () => {
+    process.off('exit', killOnExit);
     if (browser.isConnected()) {
       const session = await browser.newBrowserCDPSession().catch(() => null);
       await session?.send('Browser.close').catch(() => {});

@@ -26,6 +26,8 @@ const DEFAULTS = {
   speed: 'safe',
   limit: 0,
   dailyLimit: 300,
+  // Ring the terminal bell when a run ends, for when the window is minimized.
+  bell: true,
   today: { date: '', count: 0 },
   lastLimitedAt: null,
   lastRunAt: null,
@@ -47,6 +49,7 @@ export class Settings {
       if (saved.speed in SPEEDS) this.speed = saved.speed;
       if (Number.isInteger(saved.limit) && saved.limit >= 0) this.limit = saved.limit;
       if (Number.isInteger(saved.dailyLimit) && saved.dailyLimit >= 0) this.dailyLimit = saved.dailyLimit;
+      if (typeof saved.bell === 'boolean') this.bell = saved.bell;
       if (saved.today && typeof saved.today.date === 'string') this.today = { date: saved.today.date, count: Number(saved.today.count) || 0 };
       if (typeof saved.lastLimitedAt === 'string') this.lastLimitedAt = saved.lastLimitedAt;
       if (typeof saved.lastRunAt === 'string') this.lastRunAt = saved.lastRunAt;
@@ -58,8 +61,8 @@ export class Settings {
   }
 
   async save() {
-    const { speed, limit, dailyLimit, today, lastLimitedAt, lastRunAt, recent } = this;
-    await writeFile(this.file, JSON.stringify({ speed, limit, dailyLimit, today, lastLimitedAt, lastRunAt, recent }, null, 2));
+    const { speed, limit, dailyLimit, bell, today, lastLimitedAt, lastRunAt, recent } = this;
+    await writeFile(this.file, JSON.stringify({ speed, limit, dailyLimit, bell, today, lastLimitedAt, lastRunAt, recent }, null, 2));
   }
 
   get speedProfile() {

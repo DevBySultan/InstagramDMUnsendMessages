@@ -56,7 +56,9 @@ Use the arrow keys and Enter to choose.
 
 Conversations you used appear at the top of the list next time, with how many messages were unsent and how the last run ended (done, stopped partway, rate limited, or "web cannot unsend this"), so you know which ones not to retry.
 
-**Saved conversations** lets you rename them, remove the ones you pick, or remove all of them. This only changes the list kept in the tool; it does not touch Instagram.
+**Saved conversations** lets you open one in the browser window, rename them, remove the ones you pick, or remove all of them. This only changes the list kept in the tool; it does not touch Instagram.
+
+**The Chronicle** keeps a record of every run: when, which conversation, how many messages, how long, and how it ended, with all-time totals. It holds counts and outcomes only, never message text, and can be cleared from the same screen.
 
 ## Settings
 
@@ -64,9 +66,12 @@ Conversations you used appear at the top of the list next time, with how many me
 | --- | --- |
 | Speed | **Safe** (default): 3-7 s between messages, 2 min break every 30 · **Normal**: 1.5-4 s, 90 s break every 40 · **Fast**: 0.8-2 s, 1 min break every 60 |
 | Messages per run | Stop after this many, to spread a big conversation over several days. 0 = no limit |
+| Bell when done | Rings the terminal bell when a run ends, so you know even with the window minimized. On by default |
 | Daily cap | Most messages to unsend in one day, across all runs (default 300). A guard of our own: Instagram does not publish its limits. 0 = no cap |
 
-Settings and the saved conversations are kept in `settings.json` in the tool's folder, and the Instagram login in `.browser-profile/`. **Log out** erases all of it: the login, the saved conversations, the settings and any diagnose reports. Messages you unsent stay unsent.
+Settings and the saved conversations are kept in `settings.json` in the tool's folder, the Chronicle in `history.json`, and the Instagram login in `.browser-profile/`. **Log out** erases all of it: the login, the saved conversations, the Chronicle, the settings and any diagnose reports. Messages you unsent stay unsent.
+
+Closing the terminal window also closes the tool's browser window.
 
 ## Limits and risks
 
@@ -85,7 +90,8 @@ Settings and the saved conversations are kept in `settings.json` in the tool's f
 | `src/cli.mjs` | Menus, choosing a conversation, progress and summary |
 | `src/unsender.mjs` | Browser automation: finding your messages and unsending them |
 | `src/browser.mjs` | Starts Google Chrome as plain Chrome (no automation switches) and connects to it |
-| `src/settings.mjs` | Speed presets, limit and recent conversations |
+| `src/settings.mjs` | Speed presets, limits and saved conversations |
+| `src/history.mjs` | The Chronicle: the record of past runs |
 | `src/ui.mjs` | Terminal output helpers |
 | `test/` | Tests against a local copy of a DM page (`mock-thread.html`), not against Instagram |
 
