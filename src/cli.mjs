@@ -611,11 +611,6 @@ function help() {
 export async function main() {
   await settings.load();
   await history.load();
-  // Closing the terminal window (SIGHUP, also on Windows) closes the browser too.
-  process.once('SIGHUP', async () => {
-    await closeBrowser();
-    process.exit(129);
-  });
   try {
     while (true) {
       ui.banner(VERSION, ui.ribbon([

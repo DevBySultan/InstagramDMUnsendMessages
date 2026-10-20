@@ -46,9 +46,62 @@ async function waitForPort(profileDir, child) {
   return null;
 }
 
+// A browser this tool started earlier and that is still open, for example
+// after the terminal window was closed while it ran. Returns it, or null.
+async function connectToOpen(profileDir) {
+  let port;
+  try {
+    port = (await readFile(path.join(profileDir, 'DevToolsActivePort'), 'utf8')).split('\n')[0].trim();
+  } catch {
+    return null;
+  }
+  if (!port) return null;
+  try {
+    return await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 3000 });
+  } catch {
+    return null;
+  }
+}
+
+function session(browser, child) {
+  // If the tool ends without closing the browser it started, close it too.
+  // Node's 'exit' does not fire on a signal, so SIGHUP (terminal window closed)
+  // and SIGTERM are handled too. Not SIGINT: Ctrl+C during a run must leave the
+  // browser open so the run can be continued. Any still-open browser is also
+  // reconnected to on the next launch, which covers Windows and a hard kill.
+  const killChild = () => {
+    if (child && child.exitCode === null) child.kill();
+  };
+  const onSignal = (signal) => {
+    killChild();
+    process.exit(signal === 'SIGHUP' ? 129 : 143);
+  };
+  process.on('exit', killChild);
+  process.once('SIGHUP', onSignal);
+  process.once('SIGTERM', onSignal);
+
+  const close = async () => {
+    process.off('exit', killChild);
+    process.off('SIGHUP', onSignal);
+    process.off('SIGTERM', onSignal);
+    if (browser.isConnected()) {
+      const cdp = await browser.newBrowserCDPSession().catch(() => null);
+      await cdp?.send('Browser.close').catch(() => {});
+    }
+    if (!child) return;
+    for (let i = 0; i < 50 && child.exitCode === null; i++) await sleep(100);
+    if (child.exitCode === null) child.kill();
+  };
+  const onClose = (callback) => browser.on('disconnected', callback);
+  return { context: browser.contexts()[0], close, onClose };
+}
+
 // Returns { context, close, onClose }. context is the browser's own window
 // and tabs, so the Instagram login is kept in profileDir between runs.
 export async function launchBrowser(profileDir, { headless = false } = {}) {
+  const open = await connectToOpen(profileDir);
+  if (open) return session(open, null);
+
   const executable = findChrome();
   if (!executable) throw new Error('No browser found. Install Google Chrome, or run: npx playwright install chromium');
 
@@ -75,23 +128,5 @@ export async function launchBrowser(profileDir, { headless = false } = {}) {
     throw new Error('The browser did not start. If an IG Unsend browser window is still open, close it and try again.');
   }
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-  const context = browser.contexts()[0];
-  // If the tool ends without closing it (an error, the terminal killed), take
-  // the browser down with it instead of leaving it running.
-  const killOnExit = () => {
-    if (child.exitCode === null) child.kill();
-  };
-  process.on('exit', killOnExit);
-
-  const close = async () => {
-    process.off('exit', killOnExit);
-    if (browser.isConnected()) {
-      const session = await browser.newBrowserCDPSession().catch(() => null);
-      await session?.send('Browser.close').catch(() => {});
-    }
-    for (let i = 0; i < 50 && child.exitCode === null; i++) await sleep(100);
-    if (child.exitCode === null) child.kill();
-  };
-  const onClose = (callback) => browser.on('disconnected', callback);
-  return { context, close, onClose };
+  return session(browser, child);
 }

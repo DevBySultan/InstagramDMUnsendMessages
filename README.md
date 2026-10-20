@@ -71,7 +71,7 @@ Conversations you used appear at the top of the list next time, with how many me
 
 Settings and the saved conversations are kept in `settings.json` in the tool's folder, the Chronicle in `history.json`, and the Instagram login in `.browser-profile/`. **Log out** erases all of it: the login, the saved conversations, the Chronicle, the settings and any diagnose reports. Messages you unsent stay unsent.
 
-Closing the terminal window also closes the tool's browser window.
+Closing the terminal window also closes the tool's browser window. If the tool is ever cut off with its browser still open, the next start connects to that browser again instead of opening a second one.
 
 ## Limits and risks
 
