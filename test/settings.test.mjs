@@ -47,3 +47,25 @@ test('ignores invalid saved values', () => withDir(async (dir) => {
   assert.equal(settings.dailyLimit, 300);
   assert.equal(settings.lastLimitedAt, null);
 }));
+
+test('renames and removes saved conversations, some or all', () => withDir(async (dir) => {
+  const settings = await new Settings(dir).load();
+  for (const id of [1, 2, 3]) await settings.remember(`https://www.instagram.com/direct/t/${id}/`, { name: `Chat ${id}` });
+  await settings.rename('https://www.instagram.com/direct/t/2/', 'Renamed');
+  await settings.forget(['https://www.instagram.com/direct/t/1/', 'https://www.instagram.com/direct/t/3/']);
+  let reloaded = await new Settings(dir).load();
+  assert.deepEqual(reloaded.recent.map((r) => r.name), ['Renamed']);
+  await reloaded.forget();
+  reloaded = await new Settings(dir).load();
+  assert.equal(reloaded.recent.length, 0);
+}));
+
+test('keeps the last outcome of a conversation and resets to defaults', () => withDir(async (dir) => {
+  const settings = await new Settings(dir).load();
+  settings.dailyLimit = 50;
+  await settings.remember('https://www.instagram.com/direct/t/1/', { status: 'refused' });
+  assert.equal((await new Settings(dir).load()).recent[0].status, 'refused');
+  settings.reset();
+  assert.equal(settings.dailyLimit, 300);
+  assert.equal(settings.recent.length, 0);
+}));

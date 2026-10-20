@@ -54,7 +54,9 @@ Use the arrow keys and Enter to choose.
 2. **Unsend my messages** when the test finds your messages. First a checklist: Instagram in English, Safe speed, no refusal or limit from Instagram in the last 24 hours, an hour since the last run, a test run done on this conversation, and what is left of today's cap. Then the conversation, speed and limit, and it starts only when you type `UNSEND`.
 3. While it runs you see the count, the speed per minute and the time. Keep the browser window open (minimizing is fine). **Ctrl+C** stops safely after the current message; running it again continues where it stopped.
 
-Conversations you used appear at the top of the list next time, with how many messages were unsent.
+Conversations you used appear at the top of the list next time, with how many messages were unsent and how the last run ended (done, stopped partway, rate limited, or "web cannot unsend this"), so you know which ones not to retry.
+
+**Saved conversations** lets you rename them, remove the ones you pick, or remove all of them. This only changes the list kept in the tool; it does not touch Instagram.
 
 ## Settings
 
@@ -64,7 +66,7 @@ Conversations you used appear at the top of the list next time, with how many me
 | Messages per run | Stop after this many, to spread a big conversation over several days. 0 = no limit |
 | Daily cap | Most messages to unsend in one day, across all runs (default 300). A guard of our own: Instagram does not publish its limits. 0 = no cap |
 
-Settings and the recent conversations are saved in `settings.json` in the tool's folder. The Instagram login is kept in `.browser-profile/`; **Log out** deletes it.
+Settings and the saved conversations are kept in `settings.json` in the tool's folder, and the Instagram login in `.browser-profile/`. **Log out** erases all of it: the login, the saved conversations, the settings and any diagnose reports. Messages you unsent stay unsent.
 
 ## Limits and risks
 

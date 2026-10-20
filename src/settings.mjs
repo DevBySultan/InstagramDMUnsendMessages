@@ -66,17 +66,25 @@ export class Settings {
     return SPEEDS[this.speed];
   }
 
+  // Back to defaults in memory, after the settings file was erased.
+  reset() {
+    Object.assign(this, structuredClone(DEFAULTS));
+  }
+
   // Messages unsent today, in local time.
   get unsentToday() {
     return this.today.date === localDate() ? this.today.count : 0;
   }
 
   // Moves the conversation to the top of the recent list and adds to its totals.
-  async remember(url, { name, unsent = 0, tested = false } = {}) {
+  // status is the last run's outcome (e.g. 'refused', 'limited', 'done'), kept
+  // so the list can warn which conversations not to retry today.
+  async remember(url, { name, unsent = 0, tested = false, status } = {}) {
     const existing = this.recent.find((r) => r.url === url);
     const entry = existing ?? { url, name: '', unsent: 0 };
     if (name) entry.name = name;
     if (tested) entry.tested = true;
+    if (status) entry.status = status;
     entry.unsent += unsent;
     this.today = { date: localDate(), count: this.unsentToday + unsent };
     entry.lastUsed = new Date().toISOString();
@@ -84,8 +92,16 @@ export class Settings {
     await this.save();
   }
 
-  async forget(url) {
-    this.recent = this.recent.filter((r) => r.url !== url);
+  async rename(url, name) {
+    const entry = this.recent.find((r) => r.url === url);
+    if (entry) entry.name = name;
+    await this.save();
+  }
+
+  // Removes the given saved conversations, or all of them when urls is omitted.
+  async forget(urls) {
+    const set = urls && new Set(Array.isArray(urls) ? urls : [urls]);
+    this.recent = set ? this.recent.filter((r) => !set.has(r.url)) : [];
     await this.save();
   }
 }

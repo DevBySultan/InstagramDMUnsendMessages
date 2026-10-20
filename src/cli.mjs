@@ -21,6 +21,7 @@ const select = themed(prompts.select);
 const input = themed(prompts.input);
 const number = themed(prompts.number);
 const confirm = themed(prompts.confirm);
+const checkbox = themed(prompts.checkbox);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE = path.join(ROOT, '.browser-profile');
 const DEBUG = path.join(ROOT, 'debug');
@@ -101,12 +102,30 @@ const threadId = (url) => url.match(CONVERSATION_URL)?.[2] ?? url;
 const isConversationUrl = (url) => CONVERSATION_URL.test(url) || (!!process.env.IG_UNSEND_ALLOW_ANY_URL && url.length > 0);
 const label = (entry) => entry.name || `Conversation ${threadId(entry.url)}`;
 
+// A short tag for a saved conversation's last outcome, for the lists.
+const STATUS_TAGS = {
+  refused: () => ui.wine('web cannot unsend this'),
+  limited: () => amber('was rate limited'),
+  blocked: () => amber('was rate limited'),
+  end: () => sage('done'),
+  limit: () => sage('partly done'),
+  daily: () => sage('partly done'),
+  stopped: () => bronze('stopped partway'),
+};
+const statusTag = (entry) => (entry.status && STATUS_TAGS[entry.status] ? STATUS_TAGS[entry.status]() : '');
+const describe = (entry) => {
+  const parts = [`${entry.unsent} unsent so far`, `last used ${entry.lastUsed?.slice(0, 10) ?? '-'}`];
+  const tag = statusTag(entry);
+  if (tag) parts.push(tag);
+  return parts.join('  ·  ');
+};
+
 async function chooseConversation() {
   while (true) {
     const recent = settings.recent.map((entry) => ({
-      name: label(entry),
+      name: statusTag(entry) ? `${label(entry)}  ${bronze('—')} ${statusTag(entry)}` : label(entry),
       value: entry,
-      description: `${entry.url}  ·  ${entry.unsent} unsent so far  ·  last used ${entry.lastUsed?.slice(0, 10) ?? '-'}`,
+      description: describe(entry),
     }));
     const choice = await select({
       message: 'Which conversation?',
@@ -326,7 +345,12 @@ async function runUnsend({ dryRun }) {
     settings.lastRunAt = new Date().toISOString();
     if (['refused', 'limited', 'blocked'].includes(stats.stoppedBy)) settings.lastLimitedAt = settings.lastRunAt;
   }
-  await settings.remember(target.url, { name: target.name, unsent: stats.unsent, tested: dryRun && stats.found > 0 });
+  await settings.remember(target.url, {
+    name: target.name,
+    unsent: stats.unsent,
+    tested: dryRun && stats.found > 0,
+    status: dryRun ? undefined : stats.stoppedBy,
+  });
 }
 
 async function diagnose() {
@@ -406,17 +430,85 @@ async function settingsMenu() {
   }
 }
 
+async function manageSaved() {
+  while (true) {
+    ui.title('Saved conversations');
+    if (settings.recent.length === 0) {
+      ui.info('No saved conversations.');
+      ui.blank();
+      await input({ message: 'Press Enter to return to the menu' });
+      return;
+    }
+    ui.note('These are only names and links saved on this computer. Removing them does not touch Instagram.');
+    ui.blank();
+    const action = await select({
+      message: `${settings.recent.length} saved. What do you want to do?`,
+      choices: [
+        { name: 'Rename one', value: 'rename' },
+        { name: 'Remove some', value: 'remove' },
+        { name: 'Remove all', value: 'removeAll' },
+        { name: 'Back', value: 'back' },
+      ],
+    });
+    if (action === 'back') return;
+
+    if (action === 'rename') {
+      const entry = await select({
+        message: 'Rename which?',
+        pageSize: 12,
+        choices: [...settings.recent.map((e) => ({ name: label(e), value: e, description: describe(e) })), ui.divider(), { name: 'Back', value: null }],
+      });
+      if (!entry) continue;
+      const name = (await input({ message: 'New name:', default: entry.name })).trim();
+      await settings.rename(entry.url, name);
+      ui.ok('Renamed.');
+    } else if (action === 'remove') {
+      const urls = await checkbox({
+        message: 'Pick the ones to remove (Space to tick, Enter to confirm):',
+        pageSize: 12,
+        choices: settings.recent.map((e) => ({ name: label(e), value: e.url, description: describe(e) })),
+      });
+      if (urls.length === 0) {
+        ui.info('Nothing removed.');
+        continue;
+      }
+      if (await confirm({ message: `Remove ${urls.length} saved conversation(s)?`, default: true })) {
+        await settings.forget(urls);
+        ui.ok(`Removed ${urls.length}.`);
+      }
+    } else {
+      if (await confirm({ message: `Remove all ${settings.recent.length} saved conversations?`, default: false })) {
+        await settings.forget();
+        ui.ok('All saved conversations removed.');
+      }
+    }
+  }
+}
+
 async function logOut() {
   ui.title('Log out');
-  if (!existsSync(PROFILE)) {
-    ui.info('There is no saved login on this computer.');
+  const hasLogin = existsSync(PROFILE);
+  const hasData = settings.recent.length > 0 || existsSync(settings.file) || existsSync(DEBUG);
+  if (!hasLogin && !hasData) {
+    ui.info('Nothing to remove: no saved login and no saved data on this computer.');
     return;
   }
-  const sure = await confirm({ message: 'Log out and delete the saved Instagram login on this computer?', default: false });
-  if (!sure) return;
+  ui.warn('This logs you out of Instagram and erases everything the tool kept on this computer:');
+  ui.note('the saved login, the saved conversations, your settings, and any diagnose reports.');
+  ui.note('Messages you unsent stay unsent. Nothing else changes on your Instagram account.');
+  ui.blank();
+  if (!(await confirm({ message: 'Log out and erase everything?', default: false }))) {
+    ui.info('Nothing was removed.');
+    return;
+  }
   await closeBrowser();
-  await rm(PROFILE, { recursive: true, force: true });
-  ui.ok('Logged out. You will log in again next time.');
+  await Promise.all([
+    rm(PROFILE, { recursive: true, force: true }),
+    rm(settings.file, { force: true }),
+    rm(DEBUG, { recursive: true, force: true }),
+  ]);
+  settings.reset();
+  ui.ok('Logged out, and everything on this computer was erased.');
 }
 
 function help() {
@@ -460,8 +552,9 @@ export async function main() {
           { name: 'Unsend my messages', value: 'unsend', description: 'Unsend your messages in a conversation, for both sides.' },
           ui.divider(),
           { name: 'Settings', value: 'settings', description: 'Speed and messages per run.' },
+          { name: 'Saved conversations', value: 'saved', description: 'Rename or remove the conversations saved in this tool. Does not touch Instagram.' },
           { name: 'Diagnose', value: 'diagnose', description: 'Save a report if the tool cannot find your messages.' },
-          { name: 'Log out', value: 'logout', description: 'Delete the saved Instagram login on this computer.' },
+          { name: 'Log out', value: 'logout', description: 'Log out of Instagram and erase everything the tool kept on this computer.' },
           { name: 'Help', value: 'help', description: 'How to use it, and what to know before you start.' },
           ui.divider(),
           { name: 'Exit', value: 'exit' },
@@ -473,6 +566,7 @@ export async function main() {
         if (action === 'test') await runUnsend({ dryRun: true });
         else if (action === 'unsend') await runUnsend({ dryRun: false });
         else if (action === 'settings') await settingsMenu();
+        else if (action === 'saved') await manageSaved();
         else if (action === 'diagnose') await diagnose();
         else if (action === 'logout') await logOut();
         else help();
@@ -481,7 +575,7 @@ export async function main() {
         ui.blank();
         ui.fail(/has been closed/i.test(error.message) ? 'The browser window was closed.' : error.message.split('\n')[0]);
       }
-      if (action !== 'settings') {
+      if (action !== 'settings' && action !== 'saved') {
         ui.blank();
         await input({ message: 'Press Enter to return to the menu' });
       }

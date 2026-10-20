@@ -134,7 +134,17 @@ export const theme = {
     error: (text) => wine(`  × ${text}`),
     help: (text) => bronze(text),
     key: (text) => gold(text),
-    keysHelpTip: () => bronze('\n  ↑↓ move  ·  number to jump  ·  Enter to choose'),
+    // The prompt's own key list, worded for people and without ⏎ (not in cmd fonts).
+    keysHelpTip: (keys) => {
+      const words = { navigate: 'move', select: 'tick', all: 'tick all', invert: 'flip all', submit: 'confirm' };
+      const isList = keys.some(([key]) => key === 'space');
+      const tips = keys.map(([key, action]) => {
+        const name = key === '⏎' ? 'Enter' : key === 'space' ? 'Space' : key;
+        return `${name} ${isList ? words[action] ?? action : action === 'select' ? 'to choose' : action === 'navigate' ? 'move' : action}`;
+      });
+      if (!isList) tips.splice(1, 0, 'number to jump');
+      return bronze(`\n  ${tips.join('  ·  ')}`);
+    },
   },
 };
 
